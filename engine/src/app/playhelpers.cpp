@@ -22,6 +22,26 @@ std::vector<float> wavToDevice(std::span<const std::byte> file, int deviceRate) 
     if (w.reject != omk::audio::WavReject::Ok || w.fmt.bits != 16 || !w.fmt.rate) return {};
     const auto* pcm = reinterpret_cast<const std::int16_t*>(file.data() + w.dataOffset);
     const std::size_t frames = w.dataBytes / (2u * (w.fmt.channels ? w.fmt.channels : 1));
+    // AN EXACT MULTIPLE (2026-09-27): a device rate 1, 2, 4 or 8 times the
+    // sound's makes `i * step` exact in double, so the loop below takes source
+    // frame `i / k` - written out here without its double multiply and
+    // push_back per sample, the same floats (the voices' resample got the same
+    // treatment; on a console each play converted its sound again)
+    if (w.fmt.rate > 0 && deviceRate % static_cast<int>(w.fmt.rate) == 0) {
+        const int k = deviceRate / static_cast<int>(w.fmt.rate);
+        if (k == 1 || k == 2 || k == 4 || k == 8) {
+            const std::size_t ch = w.fmt.channels ? w.fmt.channels : 1;
+            std::vector<float> o(frames * static_cast<std::size_t>(k) * 2);
+            float* d = o.data();
+            for (std::size_t f = 0; f < frames; ++f) {
+                const std::int16_t* p = pcm + f * ch;
+                const float l = p[0] / 32768.0f;
+                const float r = ch > 1 ? p[1] / 32768.0f : l;
+                for (int j = 0; j < k; ++j) { d[0] = l; d[1] = r; d += 2; }
+            }
+            return o;
+        }
+    }
     const double step = static_cast<double>(w.fmt.rate) / deviceRate;
     const std::size_t out = static_cast<std::size_t>(frames / step);
     std::vector<float> o;

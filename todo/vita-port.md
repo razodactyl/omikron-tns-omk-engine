@@ -1397,3 +1397,18 @@ The city on the CPU path (the self-test had dropped the program): ~150-160
 ms of work a frame - submit 42-47, staged bodies 29, pedestrians 20, the
 music top-up 25-34 in the frames it runs, meshes placed 6.8 (9.6 before
 NEON), grids 7, lights 5, and `sounds` spikes of 66 ms.
+
+**The music top-up and the sound spikes** (same log): the `audio` section's
+parts summed to ~2.5 ms a frame on average, but it was a BURST - whenever
+under a second was queued, one frame decoded a whole second of music, 25-34
+ms on the console. It now pulls a quarter second at a time, the whole refill
+only when the queue is under 0.3 s. The `sounds` section's 66 ms frames were
+every effect and scene sound decoding its WAV and resampling it again on each
+play: the converted sounds are now CACHED by their bytes' address and size
+(the global, fight and shoot libraries stay resident; the scene's clears the
+cache when the resident scene changes), and `wavToDevice` writes an exact
+1/2/4/8 rate multiple without a double multiply and push_back per sample -
+189 conversions (63 WAVs at three rates) identical to the old loop, a channel
+swap caught; the supermarket fight's frame and its 31 sound lines identical
+to the pre-NEON build; stop sound, audio queue bound, scene/actor sounds,
+audio, shoot fire green.

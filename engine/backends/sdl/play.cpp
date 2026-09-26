@@ -4526,6 +4526,22 @@ int main(int argc, char** argv) {
     // device's and has no reachable tier (PORTING B5): this takes its default
     // inverse-distance rolloff - full inside 78, 78/d out to 584, held there -
     // measured from the player. The sprite half of the effects is not drawn.
+    // THE CONVERTED SOUNDS, KEPT (2026-09-27). Every play of an effect or
+    // scene sound decoded its WAV and resampled it to the device's rate again
+    // - a footstep every step, and a console's city frame showed `sounds`
+    // sections of 66 ms. Kept by the bytes' address and size: the global,
+    // fight and shoot libraries stay resident for the run, and the scene's -
+    // the one library that changes - clears the cache when the resident scene
+    // does (`sfxSceneWas`, checked each frame in the sounds pass), so an
+    // address reused by another scene's sound never answers from the cache.
+    std::map<std::pair<const std::byte*, std::size_t>, std::vector<float>> sfxCache;
+    std::string sfxSceneWas;
+    const auto sfxPcm = [&sfxCache](std::span<const std::byte> wav) -> const std::vector<float>& {
+        const auto key = std::make_pair(wav.data(), wav.size());
+        auto it = sfxCache.find(key);
+        if (it == sfxCache.end()) it = sfxCache.emplace(key, wavToDevice(wav, 44100)).first;
+        return it->second;
+    };
     const auto shotSound = [&](long frame, int effectId, const float at[3],
                                const float* listener, const char* what) {
         const omk::FxEffect* e = effectId ? shootSfx.byId(effectId) : nullptr;
@@ -4543,7 +4559,7 @@ int main(int argc, char** argv) {
             d = std::sqrt(dx * dx + dy * dy + dz * dz);
         }
         const float gain = d <= 78.0f ? 1.0f : 78.0f / std::min(d, 584.0f);
-        const auto pcm = wavToDevice(shootRt->wavData(w), 44100);
+        const auto& pcm = sfxPcm(shootRt->wavData(w));
         std::printf("frame %ld: SHOT SOUND %s - effect %d sound %d '%s', %.0f from him, "
                     "gain %.2f\n", frame, what, effectId, e->sound,
                     shootRt->wavName(w).c_str(), double(d), double(gain));
@@ -5918,7 +5934,7 @@ int main(int argc, char** argv) {
                                 std::printf("  the hurt sound %d is not in shoot2.scx\n",
                                             shootMover.hurtSound);
                             else {
-                                const auto pcm = wavToDevice(shootRt->wavData(w), 44100);
+                                const auto& pcm = sfxPcm(shootRt->wavData(w));
                                 if (!pcm.empty()) front.playSound(pcm, false, 1.0f);
                             }
                         }
@@ -6823,7 +6839,7 @@ int main(int argc, char** argv) {
                                 "library nor fight.scx\n", es.id);
                     continue;
                 }
-                const auto pcm = wavToDevice(rt->wavData(i), 44100);
+                const auto& pcm = sfxPcm(rt->wavData(i));
                 if (!pcm.empty()) { sfxLog("ctl-effect", pcm.size(), es.id, i, 1.0f, &pcm);
                                     front.playSound(pcm); }
             }
@@ -6846,6 +6862,10 @@ int main(int argc, char** argv) {
         // what this plays.
         {
             const auto& sc = session.scene();
+            if (sc.file() != sfxSceneWas) {          // the scene's library changed
+                sfxCache.clear();
+                sfxSceneWas = sc.file();
+            }
             for (const auto& fs : sc.sounds()) {
                 // `Script_StopSound` (omk-play 71): the voice playing this
                 // wav on this node is silenced, not every voice of the wav -
@@ -6877,7 +6897,7 @@ int main(int argc, char** argv) {
                                                 // their scene does not carry;
                                                 // `sub_48CB30` returns -1 and
                                                 // the engine plays nothing
-                const auto pcm = wavToDevice(raw, 44100);
+                const auto& pcm = sfxPcm(raw);
                 if (pcm.empty()) continue;
                 // ---- POSITIONAL, because `Script_PlaySound` is 3D ------
                 //
@@ -10342,9 +10362,16 @@ int main(int argc, char** argv) {
         // Keep about a second of it in the device. The player decides what
         // comes next - including whether the track wraps - so all this does
         // is ask for more and hand it over.
-        if (!musicPaused && music.playing() && front.queuedSeconds() < 1.0) {
+        // IN QUARTER SECONDS (2026-09-27): a whole second decoded at once cost a
+        // console 25-34 ms on the frame it happened - the city's "audio"
+        // section, one frame in seven. The same work in smaller pulls, a whole
+        // refill only when the queue is close to running dry.
+        const double musicQueued = !musicPaused && music.playing() ? front.queuedSeconds() : 9.0;
+        if (musicQueued < 1.0) {
+            const double want = musicQueued < 0.3 ? 1.0 - musicQueued : std::min(0.25, 1.0 - musicQueued);
+            const std::size_t frames44 = static_cast<std::size_t>(want * 44100.0) + 1;
             std::vector<float> chunk;
-            spanned("music", [&] { music.pull(chunk, 44100); });
+            spanned("music", [&] { music.pull(chunk, frames44); });
             {
                 static double musicPeakTold = 0.0; static float musicPeak = 0.0f; static std::size_t musicSamples = 0;
                 for (const float v : chunk) musicPeak = std::max(musicPeak, std::fabs(v));

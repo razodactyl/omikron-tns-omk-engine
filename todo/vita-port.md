@@ -1375,3 +1375,25 @@ and whether its bar turned, and a failing program is DROPPED - the bodies are
 then posed on the CPU, as before GPU skinning. Shown to fail on the Mac for
 every corner on slot 0 (0 of 32) and for the rotation ignored (32 moved, 0
 turned). The next console log's `gles: pose self-test` line is the evidence.
+
+### 2026-09-27: the self-test's answer - odd slots
+
+The reader: *"Both issues are fixed"* (the crowd crash, and the cutscene limbs
+- the latter because the self-test dropped the posing program). The log's
+line: `gles: pose self-test - 16 of 32 slots moved, 16 of 32 turned - FAILED`,
+and the failures are EXACTLY the odd slots - 1, 3, 5, ... each "nothing in its
+cell", every even slot right, moved and turned. At three rows a slot the
+shader's base index is `slot * 3`, odd for an odd slot; the constant `+1`,
+`+2` offsets were never wrong (slot 0 reads rows 0, 1, 2 correctly). So on the
+Vita a COMPUTED index into a uniform array must be even. `uPose` is now FOUR
+rows a slot (`uPose[128]`, the fourth unused), every base a multiple of 4. The
+Mac passes either way; the next console log's self-test line is the proof.
+
+The same run's `omk_bench`: `threads: EXACT` (2.75x on 3 runners - the pool
+without `thread_local` holds), `place` EXACT and 1.17x on the A9 (the strided
+corner loads dominate), `texkey` EXACT and 1.74x.
+
+The city on the CPU path (the self-test had dropped the program): ~150-160
+ms of work a frame - submit 42-47, staged bodies 29, pedestrians 20, the
+music top-up 25-34 in the frames it runs, meshes placed 6.8 (9.6 before
+NEON), grids 7, lights 5, and `sounds` spikes of 66 ms.

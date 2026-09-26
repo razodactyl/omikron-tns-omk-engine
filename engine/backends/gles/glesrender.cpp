@@ -196,11 +196,16 @@ attribute vec2  aUV;
 attribute vec3  aCol;
 attribute float aPhase;
 // THE BODY POSED HERE (todo/gpu-skinning.md): `aPos` is the REST corner and
-// `aSlot` its mesh's slot; each slot's affine is three rows of `uPose`. A vec4
+// `aSlot` its mesh's slot; each slot's affine is the first three of its four rows of `uPose`. A vec4
 // ARRAY on purpose: vitaGL copies one straight (16 bytes an element), where a
 // float array is laid out 8 bytes an element and overran the heap (above).
 attribute float aSlot;
-uniform vec4  uPose[96];
+// FOUR rows a slot, the fourth unused (2026-09-27): on the Vita a computed
+// index into this array must be EVEN - the device's own self-test found every
+// ODD slot at 3 rows a slot misplaced, 16 of 32, and every even one right,
+// which is the cutscene characters' hands, feet and head flung away. At 4 a
+// slot every base is a multiple of 4; the constant +1 and +2 were never wrong.
+uniform vec4  uPose[128];
 // ...and LIT here (step 2): `vertexlight.cpp`'s law on the posed normal. Two
 // vec4 a light: the direction scaled by its strength, then its colour bytes.
 attribute vec3  aNormal;
@@ -220,7 +225,7 @@ void main() {
         wave = waveAt(i);
     }
     vCol = aCol + vec3(wave);
-    int s = int(aSlot + 0.5) * 3;
+    int s = int(aSlot + 0.5) * 4;
     // THE LIGHT, corner by corner as `applyLights` walks it: t = -(N.L)
     // truncated toward zero and clamped to 0..255, the ramp `(t * c) >> 8`
     // (exact in float: both are integers under 256), each light added and
@@ -398,7 +403,7 @@ constexpr GLuint kAttrPos = 0, kAttrUV = 1, kAttrCol = 2, kAttrPhase = 3, kAttrS
 // the lights a posed body may carry (`uLight`); a body reached by more is lit
 // on the CPU by the frontend
 constexpr int kVertexLights = 8;
-// a posed body's meshes, one affine (three vec4 rows of `uPose`) each: Kay'l
+// a posed body's meshes, one affine (four vec4 rows of `uPose`, three used) each: Kay'l
 // has 20, a crowd skeleton 19; a body with more is posed here on the CPU
 constexpr int kPoseSlots = 32;
 
@@ -890,17 +895,17 @@ bool GlesRenderer::poseSelfTest() {
     int placed[2] = {0, 0};
     std::string report;
     for (int pass = 0; pass < 2; ++pass) {
-        std::vector<float> aff(static_cast<std::size_t>(kN) * 12, 0.0f);
+        std::vector<float> aff(static_cast<std::size_t>(kN) * 16, 0.0f);   // four rows a slot
         for (int k = 0; k < kN; ++k) {
             const float cx = -1.0f + 2.0f * (static_cast<float>(k % kCols) + 0.5f) / kCols;
             const float cy = -1.0f + 2.0f * (static_cast<float>(k / kCols) + 0.5f) / kRows;
-            float* o = aff.data() + 12 * k;
+            float* o = aff.data() + 16 * k;
             if (pass == 0) { o[0] = 1; o[5] = 1; }             // as it is
             else { o[1] = -1; o[4] = 1; }                      // turned 90 degrees
             o[10] = 1;
             o[3] = cx; o[7] = cy;
         }
-        glUniform4fv(posedLoc_.pose, kN * 3, aff.data());
+        glUniform4fv(posedLoc_.pose, kN * 4, aff.data());
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glDrawArrays(GL_TRIANGLES, 0, kN * 6);
@@ -1373,17 +1378,17 @@ void GlesRenderer::submit(const Draw& d) {
         // one affine a slot: the mesh's, or the identity for a corner no mesh
         // owns (`applyPose` leaves those at rest)
         const std::size_t slots = pvb->meshOfSlot.size();
-        poseUni_.assign(slots * 12u, 0.0f);
+        poseUni_.assign(slots * 16u, 0.0f);            // four rows a slot (`kPosedVert`)
         for (std::size_t sl = 0; sl < slots; ++sl) {
             const std::int32_t m = pvb->meshOfSlot[sl];
-            float* o = poseUni_.data() + 12 * sl;
+            float* o = poseUni_.data() + 16 * sl;
             if (m >= 0 && static_cast<std::size_t>(m) < d.meshPoses) {
                 std::memcpy(o, d.meshPose + 12 * static_cast<std::size_t>(m), 12 * sizeof(float));
             } else {
                 o[0] = 1.0f; o[5] = 1.0f; o[10] = 1.0f;
             }
         }
-        glUniform4fv(L.pose, static_cast<GLsizei>(slots * 3), poseUni_.data());
+        glUniform4fv(L.pose, static_cast<GLsizei>(slots * 4), poseUni_.data());
         lastPose_ = d.meshPose;
         lastPoseGeo_ = d.geo;
     }

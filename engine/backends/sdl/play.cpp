@@ -19546,27 +19546,6 @@ int main(int argc, char** argv) {
             hintReport.insert(omk::kItemHintPrice);
             hintReport.insert(omk::kItemHintDone);
         }
-        if (walk && openScreen == 12 && walk->panel()) {
-            for (const auto& l : walk->panel()->lists) {
-                if (l.hook != omk::kHookGandharGrid || l.items.empty()) continue;
-                itemMoved[l.items[0].addr] = {walk->gandharCol() * 63 + 135,
-                                              walk->gandharRow() * 63 + 61};
-                // ...and the markers a press stamped, on their own cells
-                const auto& stamps = walk->gandharStamps();
-                for (std::size_t k = 0; k < stamps.size() && k + 1 < l.items.size(); ++k)
-                    itemMoved[l.items[k + 1].addr] = {stamps[k].first * 63 + 135,
-                                                      stamps[k].second * 63 + 61};
-                static int gandTold = -1;
-                const int key = walk->gandharRow() * 10 + walk->gandharCol();
-                if (key != gandTold) {
-                    gandTold = key;
-                    std::printf("gandhar door: the cursor is on row %d col %d; %d of the four "
-                                "symbols in (%d presses)\n", walk->gandharRow(),
-                                walk->gandharCol(), __builtin_popcount(walk->gandharMask()),
-                                walk->gandharPresses());
-                }
-            }
-        }
         // ---- DEN'S LOCKER: the wheels show their digits -----------------
         //
         // `sub_4AFBE0` spins a wheel by writing `digit * 46` into its UNLIT
@@ -19581,6 +19560,30 @@ int main(int argc, char** argv) {
         itemLitSource.clear();
         denWheelItems.clear();
         xachenItems.clear();
+        // ---- GANDHAR'S DOOR: the cursor and the markers where the hooks put
+        // them - the position AND the unlit source, which the hook and the
+        // press write to the same cell (`UiListState::itemPlace`). Moving only
+        // the position left the cursor's unlit sprite sampling the artwork at
+        // (135, 61), pasted over whichever cell it stood on.
+        if (walk && openScreen == 12 && walk->panel()) {
+            for (const auto& l : walk->panel()->lists) {
+                if (l.hook != omk::kHookGandharGrid || l.items.empty()) continue;
+                for (const auto& it : l.items)
+                    if (const auto* pl = walk->itemPlace(it.addr)) {
+                        itemMoved[it.addr]  = {(*pl)[0], (*pl)[1]};
+                        itemSource[it.addr] = {(*pl)[2], (*pl)[3]};
+                    }
+                static int gandTold = -1;
+                const int key = walk->gandharRow() * 10 + walk->gandharCol();
+                if (key != gandTold) {
+                    gandTold = key;
+                    std::printf("gandhar door: the cursor is on row %d col %d; %d of the four "
+                                "symbols in (%d presses)\n", walk->gandharRow(),
+                                walk->gandharCol(), __builtin_popcount(walk->gandharMask()),
+                                walk->gandharPresses());
+                }
+            }
+        }
         // ---- XACHEN'S CARTRIDGES: the four symbols above the buttons ------
         //
         // `sub_4AF9D0` writes the symbol's 51x23 cell into the widget's LIT

@@ -1319,6 +1319,20 @@ bool UiWalk::open(int screenId) {
     // MULTIPLAN's open (`sub_4B01F0`) writes the source list, `dword_68A610 =
     // 0`, before it binds the rows: every visit starts on the sneak.
     if (panel_->addr == kPanelMultiplan) state_->multiplanSource = 0;
+    // GANDHAR'S DOOR's open (0x004AFDF0, read from the image): the count
+    // `byte_68A608` and the mask `byte_68A60C` go to 0, the cursor's `+3C` to
+    // cell 0, and `sub_428FF0(marker, 0x40000001, 1)` hides all four markers
+    // (0x004E4B60/BA8/BF0/C38). Without the hide a marker a PREVIOUS visit
+    // stamped stays drawn, and on the next visit, before a press moves it
+    // again, it stands wherever it was left. The cursor's x/y are NOT reset -
+    // see `UiListState::itemPlace`.
+    if (panel_->addr == kPanelGandhar) {
+        gandCol_ = gandRow_ = gandPresses_ = 0;
+        gandMask_ = 0;
+        for (const auto& l : panel_->lists)
+            if (l.hook == kHookGandharGrid)
+                for (std::size_t k = 1; k < l.items.size(); ++k) setItemOff(l.items[k].addr, true);
+    }
     buildPage(*panel_);
     settle();
     return true;
@@ -1474,13 +1488,20 @@ bool UiWalk::denDial(const UiList& l, std::uint32_t bits) {
 // origin - and its `+3C` becomes `(row << 16) | col`. The hook returns 1 only
 // when the cell moved, so a confirm falls through to the item's callback.
 bool UiWalk::gandhar(const UiList& l, std::uint32_t bits) {
-    (void)l;
     const int wasCol = gandCol_, wasRow = gandRow_;
     if (bits & kUiUp)         { if (gandRow_ != 0) --gandRow_; }
     else if (bits & kUiDown)  { if (gandRow_ < 5)  ++gandRow_; }
     else if (bits & kUiLeft)  { if (gandCol_ != 0) --gandCol_; }
     else if (bits & kUiRight) { if (gandCol_ < 5)  ++gandCol_; }
     const bool moved = gandCol_ != wasCol || gandRow_ != wasRow;
+    // Written on EVERY call, moved or not, before the hook decides what to
+    // return: `+0`/`+0x10` = col * 63 + 135 and `+2`/`+0x12` = row * 63 + 61.
+    // The unlit source going with the position is what keeps the cursor
+    // invisible when it is not lit - it cuts out the artwork under itself.
+    if (!l.items.empty()) {
+        const int x = gandCol_ * 63 + 135, y = gandRow_ * 63 + 61;
+        state_->itemPlace[l.items[0].addr] = {x, y, x, y};
+    }
     if (moved)
         log_.push_back("gandhar: cell " + std::to_string(gandRow_) + "," +
                        std::to_string(gandCol_));
@@ -1634,9 +1655,7 @@ bool UiWalk::confirm() {
         // At four presses it plays interface sound 0x26; when the mask reaches
         // 0x0F it writes the ANSWER 1 - the door opens - and plays 0x27. The
         // bits are ORed, so the symbols may be pressed in any order and the
-        // same one twice does not count twice. NOT ported: the marker widgets'
-        // placement (the viewer draws the cursor, not the stamps) and the two
-        // sounds.
+        // same one twice does not count twice. NOT ported: the two sounds.
         // ---- XACHEN'S CARTRIDGES (`sub_4AF9D0`), read from the image ----
         //
         // Screen 14 is Dakobah's puzzle in front of Xendar's door: four
@@ -1702,11 +1721,13 @@ bool UiWalk::confirm() {
             // the cursor - four markers for four presses - and beyond the
             // fourth the engine walks off the end of it, which this does not
             // follow: it stamps nothing.
+            // Its unlit source is written with its position, as the cursor's.
             if (const UiList* gl = curList()) {
                 const std::size_t mk = static_cast<std::size_t>(gandPresses_);
                 if (mk < gl->items.size() && gandPresses_ <= 4) {
-                    state_->itemShown.insert(gl->items[mk].addr);
-                    gandStamps_.push_back({gandCol_, gandRow_});
+                    const int x = gandCol_ * 63 + 135, y = gandRow_ * 63 + 61;
+                    state_->itemPlace[gl->items[mk].addr] = {x, y, x, y};
+                    setItemOff(gl->items[mk].addr, false);
                 }
             }
             log_.push_back("gandhar: press " + std::to_string(gandPresses_) +

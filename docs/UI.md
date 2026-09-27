@@ -3226,6 +3226,19 @@ ORs one bit of `byte_68A60C` for four cells - (0,5), (1,3), (4,2), (5,4).
 Mask **0x0F** answers **1**. The bits are ORed, so the symbols may come in any
 order. `verify.py: engine: gandhar door`.
 
+Both functions write the cell into the item's place **twice**: `+0`/`+2`,
+where it draws, and `+0x10`/`+0x12`, its **UNLIT sprite source**. So an unlit
+cursor or marker cuts the artwork out from under itself and cannot be seen;
+only the lit sprite (the sheet's (576, 320)) shows, and the cursor, flagged
+bank B `0x2`, blinks between the two. The screen's open callback
+**0x004AFDF0** (no `proc` label; read at the address) zeroes the count, the
+mask and the cursor's `+3C` and **re-hides all four markers**
+(`sub_428FF0(marker, 0x40000001, 1)`) - but does not touch the cursor's x/y,
+which are static data, so on a revisit the cursor stands where it was left
+until the first arrow moves it (from cell 0). The port had neither half until
+2026-09-27, when a reader saw the cursor carry a rectangle of the wrong
+artwork and a marker from the previous visit parked at (0, 0).
+
 **13 `DEN`** (SCENE 43 over AREA 146, zone 2417 `Cache`) - one hook,
 `sub_4AFBE0`, both moves and answers; the screen has no item callback. UP/DOWN
 spin the wheel under the hand, LEFT/RIGHT move the hand - and they move it by

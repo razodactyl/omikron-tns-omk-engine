@@ -253,6 +253,18 @@ records the cell, the viewer places the marker there, and `UiWalk::itemShown`
 is what clears the record's not-drawn bit the way `sub_428FF0(marker,
 0x40000001, 0)` does. NOT ported, labelled: the two interface sounds.
 
+**Two faults a reader saw on 2026-09-27, both fixed the same day.** (1) The
+hovered cell showed a RECTANGLE of other artwork around the cursor: the hook
+writes the cell into the unlit source `+0x10`/`+0x12` as well as the position,
+and the port moved only the position, so the unlit sprite kept cutting out
+(135, 61) and pasting it wherever the cursor stood. (2) A lit symbol sat in the
+TOP-LEFT corner on a second visit: the open callback 0x004AFDF0 re-hides the
+four markers, the port did not, and a marker the first visit stamped was drawn
+at its record's (0, 0) until a press placed it again. Both places now live in
+`UiListState::itemPlace` (the records are static data, so they outlive the
+screen), and the open is ported. Seen headless - two presses, TAB, reopen: no
+marker, no rectangle. Awaiting the reader's look.
+
 ### 5c. DEN'S LOCKER — done 2026-09-18
 
 One hook, `sub_4AFBE0`, read from the raw image (no `proc` label). It both

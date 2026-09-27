@@ -164,6 +164,9 @@ inline constexpr int kXachenRing[14] = {7, 11, 1, 8, 3, 5, 12, 2, 4, 10, 14, 13,
 inline constexpr int kXachenCode[4] = {10, 14, 7, 9};
 inline constexpr std::uint32_t kHookGandharGrid      = 0x004AFE90u;
 inline constexpr std::uint32_t kCbGandharCell        = 0x004AFF90u;
+// Screen 12's panel; its open callback 0x004AFDF0 (no `proc` label) resets the
+// count, the mask and the cursor's `+3C`, and re-hides the four markers.
+inline constexpr std::uint32_t kPanelGandhar         = 0x004E4CB8u;
 inline constexpr std::uint32_t kPanelShopSellConfirm = 0x004E3A40u;
 inline constexpr std::uint32_t kPanelShopExamine     = 0x004E39D8u;
 // The confirm's two answers, and both end on the shop panel again.
@@ -678,6 +681,14 @@ struct UiListState {
     // each marker as it stamps one. The record has the bit SET (the markers
     // ship hidden), so nothing but this can draw them.
     std::set<std::uint32_t> itemShown;
+    // An item's PLACE as a hook rewrote it: `+0`/`+2`, where it draws, and
+    // `+0x10`/`+0x12`, its UNLIT sprite source. The Gandhar door's hook and
+    // press write both to the same cell, so an unlit widget samples the
+    // artwork under itself and cannot be seen. The records are static data,
+    // so a place outlives the screen: the door's open resets the cursor's
+    // `+3C` and NOT its x/y, and the cursor stands where it was left until the
+    // first arrow moves it.
+    std::map<std::uint32_t, std::array<int, 4>> itemPlace;
     std::set<std::uint32_t> listOff;    // ...the same over a whole list
     std::map<std::uint32_t, int> bound; // list -> how many rows it holds
     // `item+0x3C` - THE ROW a widget shows, -1 when it is past the end.
@@ -1096,9 +1107,12 @@ public:
     int   gandharRow() const { return gandRow_; }
     int   gandharPresses() const { return gandPresses_; }
     unsigned gandharMask() const { return gandMask_; }
-    // The cells the presses stamped, in order - the viewer places the marker
-    // widgets on them (`off_4E4C80[count]` in the engine).
-    const std::vector<std::pair<int, int>>& gandharStamps() const { return gandStamps_; }
+    // Where a hook put an item - {x, y, unlit source x, unlit source y} - or
+    // null for the record's own place. See `UiListState::itemPlace`.
+    const std::array<int, 4>* itemPlace(std::uint32_t addr) const {
+        const auto it = state_->itemPlace.find(addr);
+        return it == state_->itemPlace.end() ? nullptr : &it->second;
+    }
     // Den's locker, for the viewer that draws the wheels.
     int denWheel() const { return denWheel_; }
     int denDigit(int i) const { return denDigit_[i & 3]; }
@@ -1361,8 +1375,6 @@ private:
     // the cursor item's own `+3C` as `(row << 16) | col`, the mask is
     // `byte_68A60C` and the count `byte_68A608`.
     int         gandCol_ = 0, gandRow_ = 0, gandPresses_ = 0;
-    // where each press stamped its marker, in press order
-    std::vector<std::pair<int, int>> gandStamps_;
     unsigned    gandMask_ = 0;
     // DEN'S LOCKER: which wheel is under the hand (the list's own `+2`) and
     // the four digits (each wheel item's `+3C`).

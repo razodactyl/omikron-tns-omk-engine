@@ -360,7 +360,7 @@ struct small_buf {
 // crowd (the core dump: main and `omk_worker0` faulting at one instruction on
 // a garbage index). Everything below is the call's own.
 void composePose(const std::vector<Mesh>& meshes, const NodeTracks& t, int frame,
-                 bool upright, std::vector<MeshPose>& out) {
+                 bool upright, std::vector<MeshPose>& out, const std::uint8_t* only) {
     // `assign`, not a fresh vector: a caller that keeps `out` across frames
     // (a walker's own, `play.cpp`) allocates once, and every entry starts from
     // the same default `MeshPose` the by-value version constructed
@@ -402,7 +402,7 @@ void composePose(const std::vector<Mesh>& meshes, const NodeTracks& t, int frame
     // the walk up to a done ancestor: at most 25 deep (`guard`)
     int stack[32];
     for (std::size_t i = 0; i < meshes.size(); ++i) {
-        if (done[i]) continue;
+        if (done[i] || (only && !only[i])) continue;
         int depth = 0;
         std::size_t cur = i;
         int guard = 0;

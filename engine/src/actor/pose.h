@@ -154,8 +154,14 @@ std::vector<MeshPose> composePose(const std::vector<Mesh>& meshes,
                                   bool upright = true);
 // ...into `out`, which keeps its capacity - the same poses, for a caller that
 // composes one body every frame (todo/optimization.md step 18's leftovers).
+// `only`, when given, is one byte a mesh: the meshes it leaves 0 are not
+// composed and keep a default `MeshPose`. A crowd model holds four LOD
+// skeletons and draws one (`sub_48D7F0`); composing the other three was 57 of
+// its 76 meshes for nothing. A mesh inside the mask comes out exactly as it
+// would without one, since its ancestors are in the same skeleton.
 void composePose(const std::vector<Mesh>& meshes, const NodeTracks& t, int frame,
-                 bool upright, std::vector<MeshPose>& out);
+                 bool upright, std::vector<MeshPose>& out,
+                 const std::uint8_t* only = nullptr);
 
 // ------------------------------------------------- BLENDING TWO POSES
 //

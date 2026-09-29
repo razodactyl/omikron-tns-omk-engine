@@ -1843,6 +1843,16 @@ on the console):
   cached on the model (`CharModel::headOf`, `severalSkeletons`,
   `skelRootByFirstId`), as `Actor_LoadModel` binds its bones once.
 
+**k - DONE 2026-09-30**: the crowd's LOD, `sub_48D7F0`'s chain walk by view
+depth with row 7's skip and `Anim_BindNodeTrack`'s index offset
+(`docs/STREET_LIFE.md`), and `composePose` given a mesh mask so a walker poses
+its drawn skeleton's 19 meshes and not the model's 76. Level 0 with the mask is
+byte-identical to no LOD (`OMK_PED_LOD_MAX=0` against `OMK_NO_PED_LOD=1`); with
+LOD on, the worst foot-to-body offset is unchanged (22.8 / 5.3 units, against
+~240 for a bone off the wrong skeleton) and a 20 m walker draws on the coarser
+skeleton in the same place and pose. The CPU gain is below the M1's 0.1 ms
+resolution; the console's `ped compose` (1.2-2.5 ms) is what it should cut.
+
 **Correction, 2026-09-30 - the upload counter overstated.** GLES booked a
 PARTIAL upload at the whole geometry's size, so the set's 69-run motion patch
 read as 5 MB every frame; row (a)'s "53 uploads, 7.1 MB, 34 ms" and its split

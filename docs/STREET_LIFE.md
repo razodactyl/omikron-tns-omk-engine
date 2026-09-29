@@ -352,8 +352,25 @@ tracks name the first, so posing the model left the other three at rest.
 The viewer now cuts the rest geometry to the skeleton the tracks name, for
 the walkers and for the authored extras, which wear the same models (all
 twenty of Anekbah's couples and beggars had three T-posed skeletons inside
-them). How the engine picks an actor's LOD is not read; the crowd's four
-distances are `dword_4C8870`. Filed as `todo/omk-play.md` 60.
+them). Filed as `todo/omk-play.md` 60.
+
+**How the engine picks a walker's LOD - read 2026-09-30, and ported.**
+`sub_48D7F0`, the instance walk, first rejects the instance whole (clip
+distance plus the model root's `+88` radius, then the four frustum side
+planes), then walks the chain `sub_453910` built: it starts one level down
+when options row 7 (*Niveau de detail*, `HIBYTE(dword_90E724)`) is 0, and
+steps on while the VIEW DEPTH (the camera matrix's third row) is at or past
+the level's distance, `dword_4C8870` = 10/20/30/40 m; the last level holds
+past 40 m. It then binds the chosen skeleton's nodes with `dword_6A50A4 =
+level * count` (`Anim_BindNodeTrack`, 0x00470FE0: a node takes the track keyed
+by its own index LESS that offset), so the four skeletons share one 19-track
+clip and must sit in consecutive blocks of mesh indices, largest first - which
+the shipped models do (PSH_FN: `Ph`, `Pi`, `Pm`, `Pw` roots at 2, 21, 40, 59).
+The viewer does the same (`lodChainOf`), refuses a model the index rule does
+not hold for, and composes only the drawn skeleton's 19 meshes. **Still
+open**: the engine's walk keeps the last level out to the clip distance, and
+the viewer draws no walker past 40 m; whether `Sliders_Tick` hides a far
+walker on its own is not read.
 
 **What the frames settled**: the walkers are posed mid-stride in the city's
 own models, turned along their lanes, feet on the street, two of them a

@@ -3692,6 +3692,17 @@ int main(int argc, char** argv) {
             if (headMesh == -2) headMesh = omk::headMeshOf(meshes);
             return headMesh;
         }
+        // THE LOD CHAIN (`optimization.md` step 28 k). A crowd model holds
+        // four skeletons; `sub_453A70` sorts them by size, largest first, and
+        // `sub_453910` chains them at 10/20/30/40 m. `sub_48D7F0` binds the
+        // chosen one's tracks at `dword_6A50A4 = level * count` - a node takes
+        // the track keyed by its own index LESS that - so level k's meshes must
+        // sit exactly `k * count` after level 0's; a model that does not is
+        // left at one skeleton (`lodLevels == 0`), as before.
+        mutable int lodLevels = -1;                  // -1: not yet
+        mutable int lodCount = 0;                    // meshes in one skeleton
+        mutable int lodRootAt[4] = {-1, -1, -1, -1};
+        mutable std::vector<std::uint8_t> lodMask[4];
     };
     struct CharBank {
         omk::CtlFile ctl;
@@ -3905,6 +3916,10 @@ int main(int argc, char** argv) {
     struct PedJob {
         std::size_t i = 0;
         const omk::Geometry* rest = nullptr;
+        const omk::NodeTracks* tracks = nullptr;   // this level's
+        const std::uint8_t* only = nullptr;        // its skeleton's meshes, or all
+        int level = 0;
+        int foot[2] = {-1, -1};
         int lodRoot = 0;
         int frame = 0;
         int lit = 0;
@@ -3925,7 +3940,8 @@ int main(int argc, char** argv) {
         omk::Geometry posed;
         const omk::NodeTracks* tracks = nullptr;
         const omk::PedClip* clipWas = nullptr;
-        float feet = 0.0f;
+        float feet = 0.0f;               // this frame's level's
+        float feetLevel0 = 0.0f;         // level 0's, once `feetKnown`
         bool  feetKnown = false;
         bool  drawn = false;
         // `Piedg` and `Piedd` in world space - `Slider_PlaceShadow`'s two
@@ -3960,8 +3976,18 @@ int main(int argc, char** argv) {
         int cacheRoot = -1;
         const omk::Geometry* cacheRest = nullptr;
         int cacheFoot[2] = {-1, -1};
+        // ...per LOD level, filled as a level is first used (level 0 is the
+        // three above); `lodFilled` is cleared with the cache
+        std::uint8_t lodFilled = 0;
+        const omk::Geometry* lodRestL[4] = {nullptr, nullptr, nullptr, nullptr};
+        int lodFoot[4][2] = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}};
+        // the rest pose's feet height, per level: each skeleton is its own
+        bool  lodFeetKnown[4] = {false, false, false, false};
+        float lodFeet[4] = {0, 0, 0, 0};
     };
     std::vector<std::unique_ptr<PedStaged>> pedStaged;
+    // level-k tracks: the level-0 ones with every mesh index moved k skeletons on
+    std::map<std::pair<const omk::NodeTracks*, int>, omk::NodeTracks> pedLodTracks;
     std::map<std::string, std::map<int, omk::Geometry>> pedLodRest;   // model -> root mesh -> its subtree's rest
     // The skeleton a set of tracks poses: the first track's mesh followed up
     // to its root. A model with one skeleton answers its only root.
@@ -4001,6 +4027,67 @@ int main(int argc, char** argv) {
         }
         mo.severalSkeletons = roots > 1 ? 1 : 0;
         return roots > 1;
+    };
+    const auto lodChainOf = [](const CharModel& mo) -> int {
+        if (mo.lodLevels >= 0) return mo.lodLevels;
+        mo.lodLevels = 0;
+        const std::size_t nm = mo.meshes.size();
+        for (std::size_t j = 0; j < nm; ++j)
+            if (mo.meshes[j].index != static_cast<std::int32_t>(j)) return 0;   // the rule is by index
+        std::unordered_map<std::int32_t, int> byId;
+        for (std::size_t j = 0; j < nm; ++j) byId.emplace(mo.meshes[j].id, static_cast<int>(j));
+        std::vector<int> treeOf(nm, -1);
+        std::vector<int> roots;
+        for (std::size_t j = 0; j < nm; ++j) {
+            int m = static_cast<int>(j);
+            for (int guard = 0; guard < 64; ++guard) {
+                const auto it = byId.find(mo.meshes[static_cast<std::size_t>(m)].parent);
+                if (it == byId.end() || it->second == m) break;
+                m = it->second;
+            }
+            treeOf[j] = m;
+            if (m == static_cast<int>(j)) roots.push_back(m);
+        }
+        if (roots.size() < 2 || roots.size() > 4) return 0;
+        // largest first, by the corners each draws (`sub_453A70`: vertex +
+        // face count - the order is what matters, and corners are faces x 3)
+        std::map<int, std::size_t> size;
+        for (std::size_t c = 0; c < mo.rest.cornerMesh.size(); ++c) {
+            const auto mi = mo.rest.cornerMesh[c];
+            if (mi >= 0 && static_cast<std::size_t>(mi) < nm) ++size[treeOf[static_cast<std::size_t>(mi)]];
+        }
+        std::stable_sort(roots.begin(), roots.end(), [&](int a, int b) { return size[a] > size[b]; });
+        int count = 0;
+        for (std::size_t j = 0; j < nm; ++j) count += treeOf[j] == roots[0];
+        for (std::size_t k = 1; k < roots.size(); ++k) {
+            int cnt = 0;
+            for (std::size_t j = 0; j < nm; ++j) {
+                cnt += treeOf[j] == roots[k];
+                if (treeOf[j] != roots[0]) continue;
+                const std::size_t jj = j + k * static_cast<std::size_t>(count);
+                if (jj >= nm || treeOf[jj] != roots[k]) return 0;
+            }
+            if (cnt != count) return 0;
+        }
+        for (std::size_t k = 0; k < roots.size(); ++k) {
+            mo.lodRootAt[k] = roots[k];
+            mo.lodMask[k].assign(nm, 0);
+            for (std::size_t j = 0; j < nm; ++j) mo.lodMask[k][j] = treeOf[j] == roots[k] ? 1 : 0;
+        }
+        mo.lodCount = count;
+        mo.lodLevels = static_cast<int>(roots.size());
+        return mo.lodLevels;
+    };
+    const auto lodTracksFor = [&](const omk::NodeTracks* base, int level, int count) -> const omk::NodeTracks* {
+        if (!base || level == 0) return base;
+        const auto key = std::make_pair(base, level);
+        auto it = pedLodTracks.find(key);
+        if (it == pedLodTracks.end()) {
+            omk::NodeTracks t = *base;
+            for (auto& id : t.ids) if (id >= 0) id += level * count;
+            it = pedLodTracks.emplace(key, std::move(t)).first;
+        }
+        return &it->second;
     };
     const auto lodRestFor = [&](const std::string& model, const CharModel& mo, int rootMesh) -> const omk::Geometry& {
         auto& per = pedLodRest[model];
@@ -16675,6 +16762,7 @@ int main(int argc, char** argv) {
                     pedAniName = rs.ani;
                     pedAni = fs.read("ANIMS/" + rs.ani + ".ANI");
                     pedTracks.clear();
+                    pedLodTracks.clear();
                     ++pedCacheGen;
                 }
                 const auto& ws = pd.movers();
@@ -16682,9 +16770,26 @@ int main(int argc, char** argv) {
                     pedStaged.clear();
                     for (std::size_t i = 0; i < ws.size(); ++i) pedStaged.push_back(std::make_unique<PedStaged>());
                     pedTracks.clear();
+                    pedLodTracks.clear();
                     ++pedCacheGen;
                 }
                 const float reach = omk::kLodDistances[3];
+                // the view axis, for the LOD's depth (`sub_48D7F0`'s is the
+                // camera matrix's third row: the depth along it)
+                float viewFwd[3] = {view.cam.at[0] - view.cam.eye[0], view.cam.at[1] - view.cam.eye[1],
+                                    view.cam.at[2] - view.cam.eye[2]};
+                {
+                    const float l = std::sqrt(viewFwd[0] * viewFwd[0] + viewFwd[1] * viewFwd[1] +
+                                              viewFwd[2] * viewFwd[2]);
+                    if (l > 0.0f) for (float& c : viewFwd) c /= l;
+                }
+                // `OMK_NO_PED_LOD=1`: every walker on its largest skeleton, as
+                // before - for laying the two side by side
+                static const bool noPedLod = std::getenv("OMK_NO_PED_LOD") != nullptr;
+                // `OMK_PED_LOD_MAX=n`: no level past n - at 0 the skeleton mask
+                // is on and every walker on level 0, which must draw exactly
+                // what `OMK_NO_PED_LOD` draws
+                static const int pedLodMax = std::getenv("OMK_PED_LOD_MAX") ? std::atoi(std::getenv("OMK_PED_LOD_MAX")) : 3;
                 pedFootOffMax = 0.0f;
                 pedJobs.clear();
                 for (std::size_t i = 0; i < ws.size(); ++i) {
@@ -16719,18 +16824,57 @@ int main(int argc, char** argv) {
                         p.cacheModel = w.model;
                         p.cacheRoot = p.tracks ? skeletonRootOf(*p.mo, *p.tracks) : p.mo->root;
                         p.cacheRest = &lodRestFor(w.model, *p.mo, p.cacheRoot);
+                        p.lodFilled = 0;
                         for (int f = 0; f < 2; ++f) {
                             const char* bone = f == 0 ? "Piedg" : "Piedd";
                             p.cacheFoot[f] = p.mo->boneIdx.built() ? p.mo->boneIdx.find(bone, p.cacheRoot)
                                                                    : omk::findMeshContaining(p.mo->meshes, bone, p.cacheRoot);
                         }
                     }
-                    const int lodRoot = p.cacheRoot;
-                    const omk::Geometry& rest = *p.cacheRest;
+                    // THE LEVEL, `sub_48D7F0`'s walk of the chain: start one
+                    // level down when row 7's detail is 0, then step on while
+                    // the VIEW DEPTH is at or past the level's distance; the
+                    // last level holds past 40 m. Only for a model whose
+                    // chain the index rule holds for, and whose tracks were
+                    // bound on the chain's first (largest) skeleton.
+                    PedJob job;
+                    job.i = i;
+                    job.tracks = p.tracks;
+                    job.rest = p.cacheRest;
+                    job.lodRoot = p.cacheRoot;
+                    job.foot[0] = p.cacheFoot[0]; job.foot[1] = p.cacheFoot[1];
+                    const int nL = noPedLod ? 0 : lodChainOf(*p.mo);
+                    if (nL > 1 && p.tracks && p.cacheRoot == p.mo->lodRootAt[0]) {
+                        const float depth = (w.body[0] - view.cam.eye[0]) * viewFwd[0] +
+                                            (w.body[1] - view.cam.eye[1]) * viewFwd[1] +
+                                            (w.body[2] - view.cam.eye[2]) * viewFwd[2];
+                        int level = std::min(shadowDetail <= 0 ? 1 : 0, nL - 1);
+                        while (level + 1 < nL && depth >= omk::kLodDistances[level]) ++level;
+                        level = std::max(0, std::min(level, pedLodMax));
+                        job.level = level;
+                        job.only = p.mo->lodMask[level].data();
+                        if (level > 0) {
+                            if (!(p.lodFilled & (1u << level))) {
+                                p.lodFilled |= static_cast<std::uint8_t>(1u << level);
+                                const int rk = p.mo->lodRootAt[level];
+                                p.lodRestL[level] = &lodRestFor(w.model, *p.mo, rk);
+                                for (int f = 0; f < 2; ++f) {
+                                    const char* bone = f == 0 ? "Piedg" : "Piedd";
+                                    p.lodFoot[level][f] = p.mo->boneIdx.built() ? p.mo->boneIdx.find(bone, rk)
+                                                        : omk::findMeshContaining(p.mo->meshes, bone, rk);
+                                }
+                            }
+                            job.tracks = lodTracksFor(p.tracks, level, p.mo->lodCount);
+                            job.rest = p.lodRestL[level];
+                            job.lodRoot = p.mo->lodRootAt[level];
+                            job.foot[0] = p.lodFoot[level][0]; job.foot[1] = p.lodFoot[level][1];
+                        }
+                    }
                     int frame = static_cast<int>(std::floor(w.clock)) - 1;
                     if (frame < 0) frame = 0;
                     if (p.tracks && frame >= p.tracks->frames) frame = p.tracks->frames - 1;
-                    pedJobs.push_back(PedJob{i, &rest, lodRoot, frame});
+                    job.frame = frame;
+                    pedJobs.push_back(job);
                 }
                 // ---- THE BODIES, which may run on several cores -----------
                 //
@@ -16772,8 +16916,8 @@ int main(int argc, char** argv) {
                         // this body may be running on another thread.
                         const double tc0 = phaseNow();
                         std::vector<omk::MeshPose>& pose = p.pose;
-                        if (p.tracks) omk::composePose(p.mo->meshes, *p.tracks, frame, false, pose);
-                        else omk::composePose(p.mo->meshes, omk::NodeTracks{}, 0, false, pose);
+                        if (j.tracks) omk::composePose(p.mo->meshes, *j.tracks, frame, false, pose, j.only);
+                        else omk::composePose(p.mo->meshes, omk::NodeTracks{}, 0, false, pose, j.only);
                         const double tc1 = phaseNow();
                         // THE GPU PATH (todo/gpu-skinning.md step 3): where the
                         // renderer poses bodies and the lights that reach this
@@ -16814,18 +16958,26 @@ int main(int argc, char** argv) {
                         // at pelvis level and sank every sitter into the street (a
                         // reader's frame, 2026-09-03). The sit's root drops 20.7 over
                         // its enter clip; that is what puts him on the ground.
-                        if (!p.feetKnown) {
+                        // ...per LOD level: each skeleton is its own rest
+                        if (j.level == 0 ? !p.feetKnown : !p.lodFeetKnown[j.level]) {
                             const auto restPose = omk::composePose(p.mo->meshes, omk::NodeTracks{}, 0, false);
                             omk::Geometry restPosed;
                             omk::applyPose(restPosed, rest, p.mo->meshes, restPose);
-                            p.feet = -1e9f;
-                            for (const auto& c : restPosed.corners) if (c.y > p.feet) p.feet = c.y;
-                            p.feetKnown = true;
+                            float feet = -1e9f;
+                            for (const auto& c : restPosed.corners) if (c.y > feet) feet = c.y;
+                            if (j.level == 0) { p.feetLevel0 = feet; p.feetKnown = true; }
+                            else { p.lodFeet[j.level] = feet; p.lodFeetKnown[j.level] = true; }
                         }
+                        p.feet = j.level == 0 ? p.feetLevel0 : p.lodFeet[j.level];
+                        // the pelvis of the skeleton DRAWN: the four are
+                        // authored side by side (PSH_FN's at x -12.6, -91.2,
+                        // -170.2, -248.9), so level 0's would stand a lower
+                        // level ~79 units off per step
                         float rootXZ[2] = {0.0f, 0.0f};
-                        if (p.mo->root >= 0 && static_cast<std::size_t>(p.mo->root) < p.mo->meshes.size()) {
-                            rootXZ[0] = p.mo->meshes[static_cast<std::size_t>(p.mo->root)].pos[0];
-                            rootXZ[1] = p.mo->meshes[static_cast<std::size_t>(p.mo->root)].pos[2];
+                        const int drawRoot = j.level == 0 ? p.mo->root : j.lodRoot;
+                        if (drawRoot >= 0 && static_cast<std::size_t>(drawRoot) < p.mo->meshes.size()) {
+                            rootXZ[0] = p.mo->meshes[static_cast<std::size_t>(drawRoot)].pos[0];
+                            rootXZ[1] = p.mo->meshes[static_cast<std::size_t>(drawRoot)].pos[2];
                         }
                         // one `cos`/`sin` for the whole body instead of two a
                         // corner - the same bits, since the angle does not change
@@ -16860,7 +17012,7 @@ int main(int argc, char** argv) {
                         p.footKnown = false;
                         {
                             // the serial pass's cache, for this model and root
-                            const int fi[2] = {p.cacheFoot[0], p.cacheFoot[1]};
+                            const int fi[2] = {j.foot[0], j.foot[1]};
                             if (fi[0] >= 0 && fi[1] >= 0 &&
                                 static_cast<std::size_t>(fi[0]) < pose.size() &&
                                 static_cast<std::size_t>(fi[1]) < pose.size()) {

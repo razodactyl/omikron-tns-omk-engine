@@ -471,6 +471,22 @@ stopped guarding the moment the name changed, and nothing would have said so.
   distinguishable at a glance: break the tool's format and you get
   `0, ('SlPorteG', ...)`; break the walk and you get `8, ('SlPorteZG', ...)`.
   **A check whose input it cannot read must say so, not answer.**
+* **A GLES RUN BLOCKS AT FRAME 0 WHILE THE DISPLAY SLEEPS, AND A KILLED RUN
+  STILL WRITES ITS `--dump` - OF FRAME ONE.** On 2026-09-29, with the reader
+  away, four `omk-play-gles --frames 300` runs sat at frame 0 until a
+  watchdog killed them; each wrote the same frame-1 dump, and four agreeing
+  dumps were read as a fix confirmed - an interface-clock change was committed
+  on that and had to be reverted (`todo/optimization.md` step 25). **A dump is
+  evidence only with the frame count it came from**: read `N frames
+  presented` in the run's log before comparing hashes, and hold the display
+  awake (`caffeinate -d -u`) for any GL run. The software build under
+  `SDL_VIDEODRIVER=dummy` does not have the problem.
+* **THE DIRTY LIST IS NOT SORTED.** `Geometry::dirtyCorners` is built mesh by
+  mesh in `play.cpp` (~20 descents a street frame). Every consumer today is
+  order-independent - per-corner writes, per-triangle stamps, runs found
+  wherever they lie - but a comment said "sorted by construction", and a
+  merge written on that comment skipped corners. `OMK_DIRTY_AUDIT=1` (GLES)
+  reports the descents, and checks the list against the buffer.
 * **In zsh, `$var:path` is a MODIFIER, not a colon.** `git show
   "$c:engine/backends/sdl/play.cpp"` silently becomes `git show $c` plus
   `ngine/...`, because `:e` is the extension modifier — so a loop asking

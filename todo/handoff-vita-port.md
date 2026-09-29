@@ -161,6 +161,18 @@ assumed.
 
 ## 4. What to do next, in order
 
+**Added 2026-09-29 (`todo/optimization.md` steps 15-18, 27).** Since the last
+console log the GLES backend skips GL state a draw would set to the value it
+already has (1809 -> 92 state calls a street frame on the Mac; the frame
+identical), the music decodes through a table, and the frame makes ~160 heap
+allocations outside the software rasterizer where it made ~724. None of it
+is measured on a console. **The next city log answers it**: its `sections -`
+lines against 2026-09-27's (submit was 42-47 ms), and the new `frame N gles
+state` line every 60 frames - draws, state calls made, skipped. After that,
+**step 27** - the depth tie computed once per set load instead of every
+frame - is the largest single item left, and `--no-tie` in `args.txt` for
+one run still says whether the Vita's own depth test flickers without it.
+
 0. Nothing below can be sized without **one console log from the city**. The
    frame now prints its eight largest SECTIONS (over 150 ms) and, every 60
    frames, the per-body SPANS inside the two body sections - `ped compose`,

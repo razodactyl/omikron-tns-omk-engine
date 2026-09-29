@@ -75,6 +75,7 @@ not a CPU figure). Against the original's 32 MB, both are the port's.
 | 17 | C1: the GLES SUBMIT - state that has not changed is not set again (blend, depth mask, texture, uniforms, attributes), and a buffer's dirty runs a small gap apart go in one write | **the state cache DONE** 2026-09-29 - exact (probe and street, same binary); 1809 -> 92 state calls over 248 draws a frame; `engine: gles state cache`. **The run merge REFUTED and not committed** - it assumed the dirty list sorted, and it is not; see "25." below |
 | 25 | ~~the GLES dirty upload draws a different street from a full upload~~ | **CLOSED 2026-09-29 - NOT A BUG, and the finding was mine**: the different street came from step 17's own uncommitted run merge. The dirty list is complete and the partial upload exact (`OMK_DIRTY_AUDIT`); see "25." below |
 | 26 | RAM/GPU: `GlesRenderer::vbo_` / `poseVbo_` are keyed by `Geometry*` and never release a buffer - a geometry that is gone keeps its GPU buffer for the process's life | open |
+| 27 | **the DEPTH TIE BAKED AT LOAD** - the original's answer to a coincident pair never changes at run time, so compute it once per set load and drop the loser, instead of resolving ties every frame; see "27." below | **next** - a corpus census first, then the bake |
 | 18 | C3: the engine's per-frame HEAP churn, ~600 allocations and ~2.4 MB a frame - the sites listed in step 15 | **DONE** 2026-09-29 - 1214 -> 651 allocations a frame in the software street (-46%), and outside the software rasterizer ~724 -> ~160 (-78%); every step byte-identical; see "18." below |
 | 19 | C4: per-body lookups that never change - foot bones, `charModelFor`/`lodRestFor`, `skeletonRootOf`, shadow bone meshes, `composePose`'s parent table - cached per model or body | open |
 | 20 | C7: the Vita's flags - `-mcpu=cortex-a9`, LTO - against `omk_bench` | open |
@@ -1409,6 +1410,15 @@ tie over every posed face - that the 1999 engine did on a Pentium II at a
 fraction of this detail, and that the Dreamcast port presumably did with
 fewer, simpler bodies.
 
+> **Corrected 2026-09-29 (the reader).** "At a fraction of this detail" is not
+> established and the crowd says otherwise: its density is the engine's own
+> rule - `Slider_Init` spawns `39 x (5 - density) x h[3]` walkers from the
+> same `.OPT` circuit, on the same models (`docs/STREET_LIFE.md`) - so the
+> port draws the SAME characters the original did, and the original posed
+> and transformed every one of them on the CPU (`D3DTLVERTEX`: the engine
+> hands D3D vertices it has already transformed). What the port adds is its
+> own - GL driver calls, uploads, and the depth tie (step 27) - not detail.
+
 What would change the answer, in order of how much it would move:
 
 1. **GPU skinning and GPU lighting** - the posed bodies and the crowd's
@@ -1612,6 +1622,43 @@ while the function's own comment reads `Actor_DrawShadow`'s switch as "-1 and
 0 fall to the chest", and an npc takes the level minus one. At detail 0 that
 would mean npcs cast no shadow where the switch says they cast the chest's.
 It is the engine's switch that decides it, and it has not been re-read here.
+
+### 27. The depth tie, baked at load - the plan (2026-09-29)
+
+**Why the per-frame tie exists at all.** The original shows the FIRST-drawn
+of two coincident faces: a strict `GREATER` on a quantised z-buffer, draw
+order = the bucket key ascending (`docs/ASSETS.md` §4b). A GPU's float depth
+compare cannot reproduce that - the two faces of a sign are the same four
+vertices wound the other way, split on different diagonals, their depths
+2e-7 apart - so the port degenerates the loser in the vertex buffer, and
+decides WHICH every frame (`o3de/depthtie.*`, the Vulkan and GLES backends).
+A 16-bit depth buffer with a strict test is NOT enough: the GLES backend has
+exactly that, and without the tie the GPU gave the second face the whole sign.
+
+**Why it need not be per frame** (the reader's point: the original has no
+flicker, so its answer is reproducible without a costly one):
+
+* the pairs sit in ONE mesh (all 18 of Anekbah's, the shop signs' two sides),
+  so the state bits cancel and the order is decided by the TEXTURE SLOT alone
+  - the lower material index, drawn first, wins;
+* a mesh that moves moves every corner through the same transform
+  (`placePoints`), so a pair stays coincident, bit for bit, and keeps its
+  winner; a posed body's pairs likewise, which the posed tie already relies
+  on ("the answer is the same in every pose");
+* the slots are fixed when a set LOADS - the 58-slot cache may hand a set its
+  neighbour's slots, which can reorder a pair, but only at a load.
+
+So the original's answer is a property of (set, load), and computing it once
+there - dropping the later-drawn face from the geometry - reproduces the
+original INCLUDING its texture-cache quirk, at no per-frame cost.
+
+**What must be checked first - the census.** Across all 635 models: the
+coincident pairs within one mesh against across meshes, sets against
+characters, and whether any sits on geometry that deforms non-rigidly. A pair
+across two meshes that move independently is the one case a load-time answer
+could get wrong. Then the bake, proven by same-binary GLES street frames baked
+against the per-frame tie, byte for byte, over frames with moving cargo, and a
+check that goes red when a loser is left in.
 
 ### 25. The "dirty upload bug" - closed, and it was the merge's (2026-09-29)
 

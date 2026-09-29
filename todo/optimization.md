@@ -70,6 +70,16 @@ not a CPU figure). Against the original's 32 MB, both are the port's.
 | 11 | the player's body and camera sweeps through grids - a steep-soup grid beside `playerGrid` | **DONE** 2026-09-14 - exact (tool, play, frames); `engine: sweep grid` |
 | 10 | the posed bodies: `applyPose` in place instead of copying the rest geometry first | **in progress** 2026-09-14 - exact (tool, frames); 2000 poses 62 -> 19-25 ms; capped with steps 9 and 11: ~1-3% standing; `engine: pose equivalence` |
 | 9 | the walker's ground probe and `decorUnder` through the grid (step 2's grid never reached them) | **DONE** 2026-09-14 - exact (tool and game); ~0.5 ms a frame timed directly (0.17 ms a linear probe, ~3 a frame); capped with steps 10-11 standing: 18.6 -> 18.1-18.4 s CPU, at the edge of the noise (see below); `engine: ground grid` |
+| 15 | **the audit of 2026-09-29** (M3, GLES build) - what is left after 1-14 and GPU skinning 1-4, ranked for the Vita; see "15. The audit" below | **DONE** 2026-09-29 |
+| 16 | C2: the MUSIC decoded through a table - `AdpcmStereoStream` looks up a delta and a next index instead of branching per nibble; `pull` reuses its buffer | open |
+| 17 | C1: the GLES SUBMIT - state that has not changed is not set again (blend, depth mask, texture, uniforms, attributes), and a buffer's dirty runs a small gap apart go in one write | open |
+| 18 | C3: the engine's per-frame HEAP churn, ~600 allocations and ~2.4 MB a frame - the sites listed in step 15 | open |
+| 19 | C4: per-body lookups that never change - foot bones, `charModelFor`/`lodRestFor`, `skeletonRootOf`, shadow bone meshes, `composePose`'s parent table - cached per model or body | open |
+| 20 | C7: the Vita's flags - `-mcpu=cortex-a9`, LTO - against `omk_bench` | open |
+| 21 | C8: the VM's per-instruction `getenv` and operand vector (cutscenes and transitions only - the steady street runs ~50 instructions in 150 frames) | open |
+| 22 | RAM: textures kept as palette + indices on the CPU (15.8 MB of RGB888 today), the converted-sound cache bounded, the logs that only grow | open |
+| 23 | GPU: a smaller `GpuVert` (36 bytes of floats), and the texture format the original device was asked for | open |
+| 24 | GPU: the interface frame's round trip - upload changed rows only, or compose on the GPU (step 4's open half) | open |
 
 Each step ends in a commit and a report, per the working rhythm; the full
 sweep follows the cadence in `todo/sweep-log.md`, not these steps.
@@ -1430,6 +1440,56 @@ factor, and whether step 6 brought peak memory under the budget with room for
 vitaGL. The porting work itself (an OpenGL ES backend behind `renderer.h`,
 SDL on Vita, `std::filesystem` replaced in `datafs`, controls, 960x544) is a
 separate plan and is not started from here.
+
+### 15. The audit - 2026-09-29, on an M3
+
+**MACHINE: an Apple M3**, not the M1 every earlier figure in this file comes
+from - the reader alternates the two, so a millisecond here is NOT comparable
+with one above. The COUNTS (allocations, patches, instructions, bytes) are.
+
+The run: `build/omk-play-gles` (the Vita's renderer, drawn by macOS's GL 2.1)
+on the street start, `OMK_NO_GPU_PRESENT=1` (a hidden window - which also
+forces a readback the console does not make, so `readback` and the 888 -> 565
+dither in the samples are the measurement's, not the game's). **The GL swap
+BLOCKS while the display is off**: two runs sat on frame 1 until killed, so a
+GLES measurement needs the screen awake.
+
+What the M3 says, and why the console decides it: the main thread mostly
+WAITS on the swap; the engine's own spans are small (pedestrians ~0.2 ms,
+session 0.1, staged 0.1) and the largest engine-owned one is the MUSIC,
+0.5-0.6 ms a frame. The console's last city log on the CPU path (2026-09-27)
+was ~150-160 ms of work: submit 42-47, staged 29, pedestrians 20, music
+25-34 in the frames it ran, placement 6.8, grids 7, lights 5 - and GPU
+posing has since taken most of the body cost, which leaves SUBMIT largest.
+
+| # | found | measured / read | exact fix |
+|---|---|---|---|
+| C1 | `GlesRenderer::submit` sets blend, depth mask, texture, 7 uniforms and 4-6 attributes on EVERY draw; 69-108 buffer patches a frame, each a driver call | M3 sample: `glBufferSubData` ~19% of the main thread, the tie's patches ~6% more; ~85% of all heap allocations are the Mac driver's, one per GL call | skip unchanged state; merge dirty runs a small gap apart (step 17) |
+| C2 | the music decoded a byte at a time through branches, on the main thread | console 25-34 ms a decoded second; M3 0.5-0.6 ms a frame | a delta / next-index table (step 16) |
+| C3 | the engine's heap churn | a malloc interposer: 115-160k allocations a second at 30 fps, 14% of them from `main` - ~600 and ~2.4 MB a frame | `phSpan` (a `std::map<std::string>`, four lookups a pedestrian), `composePose`'s returned vectors, `draws` not reserved, `vis` per slot, the three motion maps rebuilt a frame, `motionLogged`'s string a motion a frame, `session.props()` by value, `pumpZoneSlots`' map and vector, `sweepSphere` / `soupInBox`'s id vectors, `particleGeometry`'s map of vectors, `applyPose`'s `tieClass` |
+| C4 | per-body lookups that never change | read | cache per model / body |
+| C5 | the player still posed on the CPU | `gpu-skinning.md` step 5 | that step |
+| C6 | the moving collision grid rebuilt a frame from 2730 triangles | console "grids" 7 ms | incremental |
+| C7 | Vita flags: `-O2 -mfpu=neon`, no `-mcpu=cortex-a9`, no LTO | `backends/vita/CMakeLists.txt` | measure on `omk_bench` (`-ffp-contract=off` keeps the hash comparable) |
+| C8 | `getenv("OMK_VMTRACE")` and a heap operand vector per VM instruction | the street runs **~50 instructions in 150 frames** (`OMK_VMTRACE`, software build) - cutscenes only | cache the flag; a fixed array |
+
+**RAM** (M3, street, live heap ~113 MB; the 297 MB peak footprint is ~106 MB
+macOS GL driver): textures 15.8 MB of RGB888 on the CPU beside the GPU copy
+(the `.3DT` is PALETTED, so index + palette is exact at a third), the two
+scene files 8.3 MB whole, the converted-sound cache 6.5 MB and unbounded,
+`Threads::Threads` 4 MB unexplained, and logs that only grow (`ActorRuntime::log_`,
+`zoneLog_`, `nothingHere_`, `Fight::events_` - whether anything clears them
+is NOT checked).
+
+**GPU**: the tie on the Vita (`--no-tie`, the reader's console run, still
+owed); `GpuVert` 36 bytes of floats; P8 textures on GXM, after reading what
+format the original device was asked for; the interface frame's round trip;
+and draw ORDER is the engine's decision, so batching is limited to what C1
+does.
+
+Refuted on the way, so nobody repeats them: the VM's per-instruction costs
+are real but not the street's (C8); `composePose`'s parent table was already
+`n log n` since `67c7848` - it is still per call, which is C4.
 
 ## What is NOT in scope
 

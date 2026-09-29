@@ -72,7 +72,9 @@ not a CPU figure). Against the original's 32 MB, both are the port's.
 | 9 | the walker's ground probe and `decorUnder` through the grid (step 2's grid never reached them) | **DONE** 2026-09-14 - exact (tool and game); ~0.5 ms a frame timed directly (0.17 ms a linear probe, ~3 a frame); capped with steps 10-11 standing: 18.6 -> 18.1-18.4 s CPU, at the edge of the noise (see below); `engine: ground grid` |
 | 15 | **the audit of 2026-09-29** (M3, GLES build) - what is left after 1-14 and GPU skinning 1-4, ranked for the Vita; see "15. The audit" below | **DONE** 2026-09-29 |
 | 16 | C2: the MUSIC decoded through a table - `AdpcmStereoStream` looks up a delta and a next index instead of branching per nibble; `pull` reserves what it appends | **DONE** 2026-09-29 - exact (93,323,264 states, 145 tracks, 17 voices); M3 whole-file decode 1469 -> 1012 ms, a 120 s music pull 52.0 -> 31.7 ms; `engine: adpcm table`. Smaller than the audit said - see "16." below |
-| 17 | C1: the GLES SUBMIT - state that has not changed is not set again (blend, depth mask, texture, uniforms, attributes), and a buffer's dirty runs a small gap apart go in one write | open |
+| 17 | C1: the GLES SUBMIT - state that has not changed is not set again (blend, depth mask, texture, uniforms, attributes), and a buffer's dirty runs a small gap apart go in one write | **the state cache DONE** 2026-09-29 - exact (probe and street, same binary); 1809 -> 92 state calls over 248 draws a frame; `engine: gles state cache`. **The run merge REFUTED and not committed** - see "17." below |
+| 25 | **the GLES DIRTY UPLOAD draws a different street from a full upload** (found by step 17): 537 pixels at frame 300, and where they differ the FULL upload is the one closer to the software reference, 511 to 14 - a correctness question on the Vita's path, not a speed one | **open** |
+| 26 | RAM/GPU: `GlesRenderer::vbo_` / `poseVbo_` are keyed by `Geometry*` and never release a buffer - a geometry that is gone keeps its GPU buffer for the process's life | open |
 | 18 | C3: the engine's per-frame HEAP churn, ~600 allocations and ~2.4 MB a frame - the sites listed in step 15 | open |
 | 19 | C4: per-body lookups that never change - foot bones, `charModelFor`/`lodRestFor`, `skeletonRootOf`, shadow bone meshes, `composePose`'s parent table - cached per model or body | open |
 | 20 | C7: the Vita's flags - `-mcpu=cortex-a9`, LTO - against `omk_bench` | open |
@@ -1520,6 +1522,59 @@ voice-over; and `engine: morph+ADPCM` 777/777 sample-identical to
 87) turns `engine: adpcm table` red on 3,145,728 states, 50 tracks and 5
 voices. What the A9 gains is not measured: its branch predictor is weaker
 than the M3's, which favours the table, and a 7 KB table sits in its L1.
+
+### 17. The GLES draw-state cache - 2026-09-29, on an M3
+
+`GlesRenderer::submit` set every piece of state a draw needs on every draw:
+blend and depth mask, the texture, the texture size, the cutout flag, the fog
+range and colour, the posed program's lights, and four to six vertex
+attributes with their pointers. `DrawState` now remembers what the last draw
+left and skips a call that would set the same value. It is FORGOTTEN at
+`begin` and at `setTextures` (which binds textures and may free ids), and the
+uniforms are kept per PROGRAM, since that is where GL keeps them. The
+attributes are safe to keep across the uploads' and tie patches' own binds
+because a pointer captures its buffer when it is set, and no buffer is ever
+deleted mid-life (which is step 26's point).
+
+| M3, same binary, `OMK_GLES_NO_STATE_CACHE` off / on | off | on |
+|---|---|---|
+| Aapkayl, dialog 402's camera, fog on: state-call groups over 25 draws | 175 | **33** |
+| Anekbah street, a frame at 1400 frames: state calls over 248 draws | 1809 | **92** |
+| pictures | - | **identical**: the probe 0 pixels (and 0 on a second frame), the street byte for byte at frames 300 and 1400 |
+
+A "group" is one decision - the attribute group alone is up to twelve GL
+calls - so the calls themselves fall further than the groups. What the
+console gains is NOT measured: the submit section was 42-47 ms of the city's
+frame, and how much of it is state setting rather than uploads and draws is
+the next console log's to say (the `gles state` line prints every 60 frames).
+
+**The other half, merging dirty runs a small gap apart, is REFUTED and was
+not committed.** Two reasons, each enough alone:
+
+* it saves almost nothing - at a 96-corner gap the street's patch count did
+  not move at all (the moving meshes are far apart in corner order), and a
+  gap wide enough to take everything only went from 4 to 2 a frame;
+* it is NOT exact today. Its premise was that the buffer holds exactly
+  `foldTies(corners)` for every corner the dirty list does not name, so
+  rewriting them writes the bytes already there. A 50000-corner gap CHANGES
+  the street's frame at 1400 - so some of those corners are stale. That is
+  step 25.
+
+**Step 25, the finding.** Same binary, `OMK_NO_DIRTY=1` (every upload whole)
+against the default (partial uploads), the street at frame 300: **537 pixels
+differ**, in a band at x 123-639, y 194-254, with the depth tie OFF as well
+as on (so it is not the tie). Laid beside the SOFTWARE reference - which
+never reads the dirty list, and whose frame is the same with it or without -
+the FULL upload is the closer at 511 of those pixels and the partial at 14.
+So on the Vita's renderer the partial upload is missing something the full
+one writes. Not bracketed further here: whether the dirty list in `play.cpp`
+misses corners that change (the scripted motion's placement went through
+NEON on 2026-09-25, after `engine: dirty corners` was written against the
+Vulkan backend), or GLES's partial path drops them. Also unresolved: the
+merge build at small gaps gave a different 1400-frame picture from the
+restored loop - cross-BUILD comparisons of these frames are not to be
+trusted until that is understood, which is why every claim above is a
+same-binary toggle.
 
 ## What is NOT in scope
 

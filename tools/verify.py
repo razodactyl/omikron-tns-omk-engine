@@ -15115,7 +15115,8 @@ def c_engine_gles_state_cache():
     92 state calls over 248 draws a frame.
 
     SHOWN TO FAIL, 2026-09-29: dropping the texture id from the bind's test
-    (`!ds_.texValid` alone) - see the step's log for the counts.
+    (`!ds_.texValid` alone) turns it red with 10 groups made and 266283
+    pixels differing, cache-on and on the second frame alike.
     """
     import platform
     import subprocess

@@ -15146,6 +15146,50 @@ def c_engine_gles_state_cache():
         "lit picture; pixels differing cache-on and on a second frame"
 
 
+def c_engine_tie_census():
+    r"""The depth tie's coincidences over every model - the census for baking
+    the tie at load (todo/optimization.md step 27).
+
+    `engine/tools/tie_census.cpp` keys faces exactly as `o3de/depthtie.cpp`
+    does (per draw, a consecutive (a,b,c)(a,c,d) pair is one quad; the key is
+    the multiset of corner positions, bit for bit) and groups every model's
+    faces by key. Measured 2026-09-29: sets 5361 coincident groups, 3821 of
+    them within ONE mesh and 1540 across meshes; characters 476 / 302 / 174;
+    objects 99 / 99 / 0. Anekbah 169 / 165 / 4 - the four are door leaves
+    (`Ported30`/`Porteg30` and three more pairs), which move. That is what
+    rules out a pure load-time answer: a group across two meshes that move
+    apart can stop being coincident, and its loser must draw again.
+
+    SHOWN TO FAIL, 2026-09-29: see the step's log for the mutation and counts.
+    """
+    import subprocess
+    eng = os.path.join(ROOT, "engine")
+    if not os.path.isdir(eng):
+        return ("skipped",), ("skipped",), "engine/ absent"
+    b = subprocess.run(["make", "-s", "build/tie_census"], cwd=eng, capture_output=True, text=True)
+    binp = os.path.join(eng, "build", "tie_census")
+    if b.returncode != 0 or not os.path.exists(binp):
+        return ("build failed",), ("built",), "engine/ must build"
+    if not os.path.isdir(omkpaths.data("MESHES")):
+        return ("skipped",), ("skipped",), "MESHES absent"
+    r = subprocess.run([binp, omkpaths.data_root()], capture_output=True, text=True)
+    rows = re.findall(r"^MESHES/(\w+) models (\d+) units (\d+) groups (\d+) members (\d+) "
+                      r"one-mesh (\d+) cross-mesh (\d+) blended (\d+)$", r.stdout, re.M)
+    a = subprocess.run([binp, omkpaths.data_root(), "--model", "Anekbah.3DO"],
+                       capture_output=True, text=True)
+    an = re.search(r"^MESHES/DECORS models 1 units \d+ groups (\d+) members \d+ one-mesh (\d+) "
+                   r"cross-mesh (\d+)", a.stdout, re.M)
+    # a parse that reads nothing must fail AS A PARSE, not answer
+    if len(rows) != 3 or not an:
+        return ("unparsed",), ("parsed",), "tie_census's output format changed"
+    got = tuple((d, int(g), int(o), int(c)) for d, _m, _u, g, _mm, o, c, _b in rows) + \
+        (("Anekbah",) + tuple(int(x) for x in an.groups()),)
+    return got, (("DECORS", 5361, 3821, 1540), ("PERSOS", 476, 302, 174),
+                 ("OBJETS", 99, 99, 0), ("Anekbah", 169, 165, 4)), \
+        "per folder: coincident groups, those within one mesh, those across meshes; " \
+        "then Anekbah's own three"
+
+
 def c_engine_vita_printf():
     r"""The Vita's printf format rewrite (`backends/vita/c99format.h`), on the
     host.
@@ -39039,6 +39083,7 @@ SLOW = [
     ("engine: vita bench", c_engine_vita_bench, "todo/vita-port.md 0; backends/vita/bench_main.cpp"),
     ("engine: gles backend", c_engine_gles_backend, "todo/vita-port.md 0; backends/gles/glesrender.cpp"),
     ("engine: gles state cache", c_engine_gles_state_cache, "todo/optimization.md 17; backends/gles/glesrender.cpp"),
+    ("engine: tie census", c_engine_tie_census, "todo/optimization.md 27; o3de/depthtie.h"),
     ("engine: gles pose", c_engine_gles_pose, "todo/gpu-skinning.md 1; backends/gles/glesrender.cpp"),
     ("engine: vita build", c_engine_vita_build, "todo/vita-port.md B1; backends/vita/CMakeLists.txt"),
     ("engine: vita printf", c_engine_vita_printf, "todo/vita-port.md; backends/vita/c99format.h"),

@@ -32,9 +32,11 @@ of each are filed in [`todo/omk-play.md`](todo/omk-play.md).
 [`engine/README.md`](engine/README.md) audits what is ported row by row, and
 it has been wrong twice, so trust it over this paragraph.
 
-A **PS Vita** port has begun as a separate backend (GLES2, the pad as the
-engine's joystick, a VitaSDK build); it has booted to adventure mode in the
-Vita3K emulator and has not run on a console.
+A **PS Vita** port is under way as a separate backend (GLES2, the pad as the
+engine's joystick, a VitaSDK build). It runs on a real console, through the
+intro films and the menu into the city, where it is still slow; its state, and
+what the next console log is to answer, are in
+[`todo/handoff-vita-port.md`](todo/handoff-vita-port.md).
 
 The name is not new — it is what the code has always called itself. The C++
 lives in `namespace omk`, the replica builds as `build/omk` and its viewer

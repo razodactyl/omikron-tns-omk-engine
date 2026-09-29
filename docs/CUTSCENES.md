@@ -557,9 +557,11 @@ rows over 0.02; shifting the comparison by one frame fails 20351 of them, so
 the agreement is a test and not a tautology (`verify.py: engine: cam mode 13`).
 `omk-play` draws through it: walking the Impasse, the `intro` editing drives
 329 of its 330 frames, then `sautdemon`, `demsuite`, `combkayl`, `demonout`,
-`mecaspeak` and `kaylup` each take the camera in turn, each falling back to
-world camera 0 when it ends — which is the engine's own cut back (SCRIPT_VM,
-camera mode 13). Frame 90 of `intro`, **looked at**, is the alley between the
+`mecaspeak` and `kaylup` each take the camera in turn. ~~each falling back to
+world camera 0 when it ends~~ - **not so** (corrected 2026-09-29): when an
+editing ends the camera HOLDS its last frame until the next camera request, the
+finding of §2 "What happens when the editing ENDS" (`verify.py: engine: editing
+hold`); this sentence predated it. Frame 90 of `intro`, **looked at**, is the alley between the
 crates through an 88° lens, where every frame before this landed drew the
 relative camera 0.
 
@@ -917,16 +919,24 @@ support, not a result. The viewer says so on screen.
 * **The two duration-0 editings** (of 125) never drive anything, since
   `Script_PlayScript` requires `clock < duration`. Authoring leftovers, most
   likely; not checked further.
-* **Three of the 17 script function ids have no name** in the binary —
-  `0x0400000C` (58 uses), `0x04000029` (59) and `0x0400001F` (3). All three are
-  in the sprite range, so they are presentation, not staging.
-* **The root quaternion's convention** — §5. The conjugate leads on the floor
-  test but not decisively, and nothing else in the shipped data discriminates.
-  A golden trace from the original (RECONSTRUCTION phase 6) would settle it in
-  one run.
-* **What `Anim_RootDelta`'s optional 3x3 is for.** It rotates the summed delta
-  when its caller passes a matrix. The scene clips need it left alone — for
-  `1-01KAY.3DA`, rotating by the root's own quaternion sinks the pelvis 70
-  units over the walk and cuts the travel from 119 to 69 — so the matrix
-  belongs to some other caller, presumably `.CTL` locomotion where the actor's
-  own facing steers the step. Not traced.
+* ~~**Three of the 17 script function ids have no name** in the binary~~ —
+  **named, 2026-09-02** (`docs/FILE_FORMATS.md` §5c): `0x0400000C` (58 uses),
+  `0x04000029` (59) and `0x0400001F` (3) are `Script_SetSpriteType`,
+  `Script_SetSpriteFrame` and `Script_SetSpriteDefaultPalette`, each naming
+  itself in its own error string; their handlers carry no `proc` label, which
+  is why a search of the decompilation found nothing. Presentation, not
+  staging, as this line said. (Corrected here 2026-09-29, found by the manual
+  regeneration of that day.)
+* ~~**The root quaternion's convention**~~ — **closed by looking**
+  (2026-08-28, `CLAUDE.md` §6): the conjugate is right; the two decisive shots,
+  `lev-4.SCX/leaboit` and `SPrison.SCX/gard1look`, both read correct in the
+  viewer, and the apparent split between conventions was the floor metric's.
+  (Corrected here 2026-09-29.)
+* ~~**What `Anim_RootDelta`'s optional 3x3 is for.**~~ **Closed for both
+  paths** (`CLAUDE.md` §6, 2026-09-02 and 2026-09-05; `docs/FILE_FORMATS.md`
+  §5c): it is the actor's FACING matrix, actor+288, rebuilt every frame from
+  the Euler that `Script_SelectRelativeBodyAnimation` and
+  `Script_SelectBodyAnimation` write before the move - so a scene clip's root
+  motion travels where the call's Euler points. What this line measured still
+  holds: rotating by the root's OWN quaternion is the wrong matrix, and sinks
+  `1-01KAY.3DA`'s pelvis 70 units. (Corrected here 2026-09-29.)

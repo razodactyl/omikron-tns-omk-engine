@@ -3655,8 +3655,9 @@ security centre** - each with its record in `todo/` and its finding in `docs/`:
   `engine: camera obstruction`.
 
 The PS Vita port that began on 2026-09-17 is a separate backend and is
-recorded in `todo/handoff-vita.md` and its own session's notes; it is not part of this
-audit.
+recorded in `todo/handoff-vita-port.md` (the state, the recipes and what next),
+`todo/vita-port.md` (the plan and the full record) and `todo/handoff-vita.md`
+(the pre-port decision); it is not part of this audit.
 
 Re-audited row by row against `CLAUDE.md` §4 on 2026-08-31, **41 content
 rows**. This table has now been wrong twice — once with a count that had

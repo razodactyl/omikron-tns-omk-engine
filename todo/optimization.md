@@ -1412,8 +1412,9 @@ fewer, simpler bodies.
 
 > **Corrected 2026-09-29 (the reader).** "At a fraction of this detail" is not
 > established and the crowd says otherwise: its density is the engine's own
-> rule - `Slider_Init` spawns `39 x (5 - density) x h[3]` walkers from the
-> same `.OPT` circuit, on the same models (`docs/STREET_LIFE.md`) - so the
+> rule - `Slider_Init` places one walker every `39 x (5 - density) x h[3]`
+> units along each pedestrian lane of the same `.OPT` circuit (a SPACING, not
+> a count), on the same models (`docs/STREET_LIFE.md` §2) - so the
 > port draws the SAME characters the original did, and the original posed
 > and transformed every one of them on the CPU (`D3DTLVERTEX`: the engine
 > hands D3D vertices it has already transformed). What the port adds is its

@@ -1,4 +1,4 @@
-# Handoff — the PS VITA PORT, as it stands on 2026-09-18
+# Handoff — the PS VITA PORT (begun 2026-09-18; §1 rewritten 2026-09-22, §4 added to 2026-09-29)
 
 **Read this first to pick up the Vita.** [`vita-port.md`](vita-port.md) is the
 plan (phases, item ids B/P/G/F/A/M) and the running record of every trap met;

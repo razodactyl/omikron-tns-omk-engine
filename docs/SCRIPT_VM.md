@@ -475,9 +475,11 @@ site over 108 sites — which vanish at 6, with 108 sites and 0 failures under
 either. They are inert zero-operand opcodes, so the stream resynchronises and
 nothing observable differs; the third operand, `Fight_Begin`'s own second
 argument, is simply unreachable while the table says 4. This is the op 103
-pattern (CLAUDE.md §1) and the table has not been corrected yet, because that
-is `tables/vm_opcodes.json` and `dialog_disasm.LEN_FIX` in one step with the
-`engine: execute` differential.
+pattern (CLAUDE.md §1). ~~The table has not been corrected yet~~ - **it has,
+2026-09-02** (corrected here 2026-09-29): `tables/vm_opcodes.json` carries op 62
+at length 6 (`"table_says": 4, "corrected": true`) and `dialog_disasm.LEN_FIX`
+maps `62: 6`, in the one step with the `engine: execute` differential this
+paragraph asked for; §62 reads the third field as the AI level.
 
 Op **152**'s block matches the same pattern and is a false positive: its block
 is unbounded (CLAUDE.md §1's trap) and swallows the interpreter that follows

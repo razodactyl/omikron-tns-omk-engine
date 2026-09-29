@@ -992,12 +992,16 @@ python3 tools/verify.py --slow   # plus the whole-asset sweeps — MINUTES
 
 It exits with the number of failures, so it drops into a hook or a `&&` chain.
 
-**"THE FULL SWEEP" MEANS `--slow`.** Plain `verify.py` is the fast list (~187
-checks) and runs **no** `engine:` check at all, so a red one can survive a run
-recorded as "0 failed": `engine: scene steps` went red on 2026-09-07 and was
-found two days later, having passed through exactly such a record
-(`todo/sweep-log.md`). The count in a sweep row is what tells the two apart -
-the fast list is 207 checks and the whole thing 383 - so write which one ran.
+**"THE FULL SWEEP" MEANS `--slow`.** Plain `verify.py` is the fast list and
+runs only a FEW `engine:` checks - 23 of the 245 on 2026-09-29; the other 222
+are behind `--slow` - so a red one can survive a run recorded as "0 failed":
+`engine: scene steps` went red on 2026-09-07 and was found two days later,
+having passed through exactly such a record (`todo/sweep-log.md`). The count in
+a sweep row is what tells the two apart - on 2026-09-29 the fast list is 228
+entries and the whole thing 485 (484 distinct checks; `engine: airlock walk` is
+registered twice) - so write which one ran. (This said "runs NO `engine:`
+check", with counts of 207 and 383; both drifted as checks were added, and
+`verify.py --list` is the authority.)
 
 `--only <substring>...` runs just the checks whose names match, and implies
 `--slow` so an `engine:` check is reachable without the whole sweep. Reach for
@@ -1590,8 +1594,9 @@ Listed with what has already been ruled out, so nobody repeats the search.
   the rig, the three CrossOver variables that fail silently, the `PATCH.dll`
   forwarder, and the three cases the logger filters out.
 * **VM opcodes** — most are identified only by their `.TAG` operand domain. The
-  world scripts exercise 124 of them, so there is a large corpus to test any
-  guess against; `tools/vm_oplen.py` recovers operand lengths from handlers.
+  world scripts exercise 119 of them (`docs/SCRIPT_VM.md`; this said 124), so
+  there is a large corpus to test any guess against; `tools/vm_oplen.py`
+  recovers operand lengths from handlers.
 * ~~**One Anekbah panel shows the wrong texture**~~ — **mechanism found
   2026-08-29, by reading the renderer** (phase 4). The reported shape — of four
   panels in one shot, 1 and 4 flicker, **2 is stably wrong, 3 is correct** —

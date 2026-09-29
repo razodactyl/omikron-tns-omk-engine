@@ -2027,8 +2027,14 @@ lighting is for characters and props, and a set is baked, full stop.
 
 Not implemented in the viewers: characters ship a flat white baked light, so
 they are drawn unlit, and the dynamic pass would need the 304-byte light
-records at `scene[8]` (169 of them in ANEKBAH) decoded first. That decode is
-**not** done — the four fields above are what `sub_493E40` reads, nothing more.
+records at `scene[8]` (169 of them in ANEKBAH) decoded first. ~~That decode is
+**not** done~~ — **it is, since 2026-09-05** (`docs/FILE_FORMATS.md` §5b "The
+LIGHT table": 4179 records of 304 bytes across 216 models, the count at
+`desc+240`, 216/216 landing exactly on the file size), and the ENGINE PORT
+lights the moving population with it per vertex (`o3de/vertexlight.*`,
+`verify.py: engine vertex light`; `CLAUDE.md` §4). What stays true is the
+sentence's first half: the web VIEWERS still draw characters unlit.
+(Corrected 2026-09-29.)
 
 ### An EFFECT emits sprites and NEVER light — the two systems only coincide
 
@@ -2769,7 +2775,8 @@ by writing the facing Euler directly.
 * each frame the walker *tries* the move, undoes it, and submits the delta to
   `Actor_Move` — an iterative **collide-and-slide** (up to 3 passes) sweeping
   the model's collision spheres against the world, with a **30° slope limit**
-  and a step height of **11.87 in = 30 cm** (the third cm→inch constant in
+  and a step height of **11.81 in = 30 cm** (`dword_910340` = 11.811023, as
+  quoted below; this read "11.87" until 2026-09-29) (the third cm→inch constant in
   the engine), sliding along walls via axis-clamped normals
   (`Walk_ClampNormal`).
 * if the probe under the actor (`Walk_ProbeGround`) finds a floor,

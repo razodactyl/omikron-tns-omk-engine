@@ -2031,7 +2031,10 @@ job:
 | `0x2000` | TAB | holster | **close**, where the panel's flag `0x20` allows |
 
 `Input_Poll` also folds the joystick in: the stick's two axes become the same
-1/2/4/8 against a deadzone, and its first ten buttons land on `0x10` upward —
+1/2/4/8 against a threshold (~~a deadzone~~ - corrected 2026-09-29: the
+threshold is `dword_52F498`, which no instruction stores to, so 0, over a range
+of -1000..1000, and the engine sets no dead zone of its own; `verify.py:
+engine: input poll`), and its first ten buttons land on `0x10` upward —
 so gamepad button 0 is confirm and button 1 is back, matching E and R.
 
 ### The dispatch chain

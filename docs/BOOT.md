@@ -38,6 +38,15 @@ starts a location — and the movies play before it. What the player reads as
 [FILE_FORMATS](FILE_FORMATS.md) §5c, so the boot path needs no special case
 for it.
 
+> **Corrected 2026-09-29** (found by the manual regeneration of that day): the
+> paragraph above is the first reading and it is WRONG on one point.
+> `aventure.scx` is not the menu - it is the game's GLOBAL sprite and sound
+> library, 20 sprites and 53 sounds (`CLAUDE.md` §2, `engine/README.md`). The
+> start menu is opened by the first area's own startup script: AREA 118's `+4`
+> script reaches `ui.open(29, ...)` (`docs/SCRIPT_VM.md`,
+> `verify.py: startup scripts`). What the paragraph gets right stands: there is
+> no separate menu state - the menu is a screen over an ordinary scene.
+
 ## 2. The three movies, and the two different skips
 
 `gamedata/FLIS/` holds exactly three files, and they are plain MPEG-1 — there is

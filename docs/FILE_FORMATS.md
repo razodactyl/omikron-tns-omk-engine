@@ -1113,7 +1113,9 @@ bitmaps (`jauge1/jauge2/jaugeg.bmp`). The "sneak" special move
 
 ## 5b6. `SCPTDATA/*.SFX` — the scene sound files
 
-**walk solved, 59/59 exact** (`verify.py: sfx files`). Magic `5.0V`, then six
+**walk solved, 67/67 exact** (`verify.py: sfx files`; this said 59/59 - eight
+files spell the extension `.Sfx` or `.SfX` and a case-sensitive glob missed
+them, corrected in the check 2026-08-31 and here 2026-09-29). Magic `5.0V`, then six
 counted sections:
 
 ```

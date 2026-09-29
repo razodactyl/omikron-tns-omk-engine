@@ -86,6 +86,21 @@ public:
     // compares differently once it has been through a C string. Reading the
     // record at `meshOff + 140 * i + 16` is what the engine does.
     int bindSetEmitters(std::span<const std::byte> modelData);
+    // ...split in two, because the SET and the `.sfx` do not arrive together:
+    // walking in, the set loads while the OUTGOING scene is still resident and
+    // its `.SCX` follows frames later (`Area_LoadScx` binds when the `.SCX`
+    // lands). A frontend keeps a set's candidates - every `0x40000000` mesh's
+    // four raw name bytes and position - and binds them into whichever runner
+    // attaches that area's `.sfx`, as often as one does.
+    struct SetEmitterMesh {
+        std::uint32_t tag = 0;           // the record's +16..+19, little-endian
+        float pos[3] = {0, 0, 0};
+    };
+    static std::vector<SetEmitterMesh> setEmitterMeshes(std::span<const std::byte> modelData);
+    int bindSetEmitters(std::span<const SetEmitterMesh> meshes);
+    // false from `attachSfx` until a `bindSetEmitters`: this runner's `.sfx`
+    // has not yet been bound against its set
+    bool setEmittersBound() const { return setEmittersBound_; }
     const SfxFile& sfx() const { return sfx_; }
     ParticleField& effects() { return fx_; }
     const ParticleField& effects() const { return fx_; }
@@ -420,6 +435,7 @@ private:
     SetPieceRunner       pieces_;
     PieceLinkResolver    links_;
     int                  fired_ = 0;
+    bool                 setEmittersBound_ = false;
     // `sub_451470(a1, id)` for a started object - a1 is 0 for a
     // scene object and the caller's own value for an actor one.
     void firePieces(int a1, int objectId);

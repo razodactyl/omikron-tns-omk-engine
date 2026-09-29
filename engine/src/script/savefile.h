@@ -251,6 +251,9 @@ std::vector<std::byte> readSaveFile(const std::string& writablePath,
                                     const std::string& shippedPath,
                                     std::string* usedPath = nullptr);
 bool writeSaveFile(const std::string& path, std::span<const std::byte> file);
+// How many times `writeSaveFile` has written, so a reader holding something
+// decoded from the file (the load panel's picture) knows to read it again.
+std::uint32_t saveFileWrites();
 
 // ------------------------------------------------------------------ the clock
 inline constexpr int kDaysPerMonth = 41, kMonthsPerYear = 13, kYearZero = 7216;

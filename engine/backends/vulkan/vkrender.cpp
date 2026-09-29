@@ -168,6 +168,8 @@ public:
     void setTextures(std::span<const omk::Texture> t) override;
     void begin(const omk::View& v) override;
     void shadowPass(const omk::View& v, std::span<const omk::Draw> casters) override;
+    bool drawsPixelLights() const override { return true; }
+    bool drawsShadowMap() const override { return true; }
     bool drawMirrorScene(const omk::View& v, const omk::View& refl,
                          std::span<const omk::Draw> scene,
                          std::span<const omk::Draw> sceneClipped,

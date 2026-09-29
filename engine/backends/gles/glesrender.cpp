@@ -200,11 +200,9 @@ attribute float aPhase;
 // ARRAY on purpose: vitaGL copies one straight (16 bytes an element), where a
 // float array is laid out 8 bytes an element and overran the heap (above).
 attribute float aSlot;
-// FOUR rows a slot, the fourth unused (2026-09-27): on the Vita a computed
-// index into this array must be EVEN - the device's own self-test found every
-// ODD slot at 3 rows a slot misplaced, 16 of 32, and every even one right,
-// which is the cutscene characters' hands, feet and head flung away. At 4 a
-// slot every base is a multiple of 4; the constant +1 and +2 were never wrong.
+// FOUR rows a slot, the fourth unused. Chosen 2026-09-27 on a WRONG reading
+// (that a computed index must be even): the device still dropped every odd
+// slot at 4 rows. The cause is the SLOT'S CONVERSION - see `s` below.
 uniform vec4  uPose[128];
 // ...and LIT here (step 2): `vertexlight.cpp`'s law on the posed normal. Two
 // vec4 a light: the direction scaled by its strength, then its colour bytes.
@@ -225,7 +223,12 @@ void main() {
         wave = waveAt(i);
     }
     vCol = aCol + vec3(wave);
-    int s = int(aSlot + 0.5) * 4;
+    // floor FIRST: the Vita's compiler ROUNDS in int() - half to even - so
+    // int(k + 0.5) is k + 1 for every odd k, which put each odd slot on its
+    // even neighbour's affine (the self-test's 16 of 32, and the cutscene
+    // bodies' flung hands, feet and head). int() of an exact integer agrees
+    // under any rounding.
+    int s = int(floor(aSlot + 0.5)) * 4;
     // THE LIGHT, corner by corner as `applyLights` walks it: t = -(N.L)
     // truncated toward zero and clamped to 0..255, the ramp `(t * c) >> 8`
     // (exact in float: both are integers under 256), each light added and

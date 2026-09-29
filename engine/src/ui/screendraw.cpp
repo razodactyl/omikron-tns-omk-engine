@@ -369,10 +369,19 @@ ScreenFrame ScreenComposer::draw(Surface& fb, int screenId,
             // display is, so the effect is always computed at 640x480 and
             // blitted out. Its two warp tables are 640 and 480 entries in the
             // image, which is the same statement from the other side.
-            Surface c(640, 480, 0);
-            cloud_->draw(c, frame_);
-            blt(fb, {0, 0, fb.w, fb.h}, c, {0, 0, 640, 480}, kBltWait,
-                /*srcKey*/ 0, /*dstKey*/ 0, filter_);
+            // NEAREST (the default): the effect straight onto `fb` at the
+            // blit's own source pixels, byte-identical to the two steps and
+            // without the 614 KB surface or its second pass. The filtered
+            // enhancement keeps the two steps, on a surface kept between
+            // frames as `sub_4B19C0` keeps its own.
+            if (filter_ < 1) {
+                cloud_->drawScaled(fb, frame_);
+            } else {
+                if (cloudSurf_.w != 640 || cloudSurf_.h != 480) cloudSurf_ = Surface(640, 480, 0);
+                cloud_->draw(cloudSurf_, frame_);
+                blt(fb, {0, 0, fb.w, fb.h}, cloudSurf_, {0, 0, 640, 480}, kBltWait,
+                    /*srcKey*/ 0, /*dstKey*/ 0, filter_);
+            }
         }
         out.cloudDrawn = true;
     }
@@ -616,8 +625,17 @@ ScreenFrame ScreenComposer::draw(Surface& fb, int screenId,
                 // way `sub_408D70` reads it.
                 const int sl = lp.slotOfRow();
                 if (sl >= 0 && !lp.path.empty()) {
-                    const auto file = DataFs::readPath(lp.path);
-                    const auto px = readSaveThumb(file, sl);
+                    // READ ON A CHANGE, not every frame: the file is the whole
+                    // save directory (3496 + 256 x 32808 bytes, ~8.4 MB) and
+                    // was read from the card on every frame a row was
+                    // selected. Again when the row, the file or a write moves.
+                    if (thumbPath_ != lp.path || thumbSlot_ != sl || thumbWrites_ != saveFileWrites()) {
+                        thumbPath_ = lp.path;
+                        thumbSlot_ = sl;
+                        thumbWrites_ = saveFileWrites();
+                        thumbPx_ = readSaveThumb(DataFs::readPath(lp.path), sl);
+                    }
+                    const auto& px = thumbPx_;
                     // WALK THE DESTINATION AND SAMPLE THE SOURCE, never the
                     // other way round. Scaling each of the 128x96 source
                     // pixels to ONE destination point leaves the gaps between

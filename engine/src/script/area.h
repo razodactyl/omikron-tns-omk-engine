@@ -1340,6 +1340,8 @@ public:
     // the scene and the frontend is the only thing that knows where the files
     // are.
     SceneRunner& sceneMutable() { return scene_; }
+    // the AREA whose pool `scene()` is - its `.sfx` binds that area's set
+    int sceneArea() const { return sceneArea_; }
     // The OTHER resident slot's pool - the outgoing scene a transition's door
     // is named against (omk-play 70). Empty (`sceneOutArea() < 0`) until an
     // area change has actually moved one aside.

@@ -68,8 +68,7 @@ bool MenuCloud::load(const DataFs& fs) {
     return readIndices(DataFs::readPath(*p), tex_);
 }
 
-void MenuCloud::draw(Surface& fb, long frame) const {
-    if (tex_.empty() || fb.w != 640 || fb.h != 480) return;
+void MenuCloud::prepare(long frame) const {
     const double f = static_cast<double>(frame);
 
     // TWO PASSES, and folding them into one is what went wrong three times.
@@ -91,7 +90,8 @@ void MenuCloud::draw(Surface& fb, long frame) const {
     const double t = 0.0785 * f;
     const int lx = static_cast<int>(std::cos(t) * 64.0) + 128;
     const int ly = static_cast<int>(std::sin(t) * 64.0) + 128;
-    std::vector<std::uint16_t> buf(256u * 256u);
+    buf_.resize(256u * 256u);
+    std::uint16_t* buf = buf_.data();
     for (int j2 = 0; j2 < 256; ++j2) {
         const int cy = (255 - j2) & 0xFF;          // `dh` counts down from 255
         const int wy = (255 - ly) - j2;            // `ebp`, `dec` per row
@@ -114,7 +114,8 @@ void MenuCloud::draw(Surface& fb, long frame) const {
     }
 
     // ---- the warp tables, `sub_4B1F40`. Stored as BYTES.
-    std::uint8_t colTab[640], rowTab[480];
+    std::uint8_t* colTab = colTab_;
+    std::uint8_t* rowTab = rowTab_;
     {
         const double pA =  0.009925 * f, pB = -0.013915 * f;   // the row table
         const double pC = -0.007685 * f, pD =  0.015635 * f;   // the column one
@@ -125,6 +126,14 @@ void MenuCloud::draw(Surface& fb, long frame) const {
             colTab[k] = static_cast<std::uint8_t>(static_cast<int>(
                 (std::cos(pC + 0.0057 * k) + std::cos(pD - 0.0099 * k)) * 48.0));
     }
+}
+
+void MenuCloud::draw(Surface& fb, long frame) const {
+    if (tex_.empty() || fb.w != 640 || fb.h != 480) return;
+    prepare(frame);
+    const std::uint16_t* buf = buf_.data();
+    const std::uint8_t* colTab = colTab_;
+    const std::uint8_t* rowTab = rowTab_;
 
     // ---- pass 2: 256x256 -> 640x480 through the warp, `loc_4B1E4D`.
     //
@@ -140,6 +149,34 @@ void MenuCloud::draw(Surface& fb, long frame) const {
             al = (al + 1) & 0xFF;
         }
     }
+}
+
+bool MenuCloud::drawScaled(Surface& fb, long frame) const {
+    if (tex_.empty() || !fb.valid()) return false;
+    if (fb.w == 640 && fb.h == 480) { draw(fb, frame); return true; }
+    prepare(frame);
+    const std::uint16_t* buf = buf_.data();
+    // `blt`'s NEAREST rule for a 640x480 source onto w x h, per column once
+    // (a runtime divide per pixel is a library call on the A9)
+    std::vector<int> sxOf(static_cast<std::size_t>(fb.w));
+    std::vector<int> colOf(static_cast<std::size_t>(fb.w));
+    for (int x = 0; x < fb.w; ++x) {
+        const int sx = x * 640 / fb.w;
+        sxOf[static_cast<std::size_t>(x)] = sx;
+        colOf[static_cast<std::size_t>(x)] = colTab_[639 - sx];
+    }
+    for (int y = 0; y < fb.h; ++y) {
+        const int sy = y * 480 / fb.h;
+        const int al0 = rowTab_[479 - sy];
+        std::uint16_t* dst = &fb.px[static_cast<std::size_t>(y) * static_cast<std::size_t>(fb.w)];
+        for (int x = 0; x < fb.w; ++x) {
+            // pass 2's pixel (sx, sy): al = rowTab[479 - sy] + sx, ah = colTab[639 - sx] + sy
+            const int ah = (colOf[static_cast<std::size_t>(x)] + sy) & 0xFF;
+            const int al = (al0 + sxOf[static_cast<std::size_t>(x)]) & 0xFF;
+            dst[x] = buf[static_cast<std::size_t>(ah) * 256 + static_cast<std::size_t>(al)];
+        }
+    }
+    return true;
 }
 
 }  // namespace omk

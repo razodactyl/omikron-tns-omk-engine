@@ -213,6 +213,11 @@ vita:
 ifeq ($(wildcard $(VITASDK_DIR)/share/vita.toolchain.cmake),)
 	@echo "no VitaSDK found (\$$VITASDK or ~/vitasdk) - the Vita build is optional;"
 	@echo "everything else builds and the suite passes without it (todo/vita-port.md)."
+else ifeq ($(wildcard $(VITASDK_DIR)/arm-vita-eabi/include/psp2/avplayer.h),)
+	@echo "the VitaSDK at $(VITASDK_DIR) is too old (no psp2/avplayer.h, and a vitaGL"
+	@echo "whose vglInitExtended predates the port); point \$$VITASDK at a current one,"
+	@echo "e.g. VITASDK=~/vitasdk make vita, and rm -rf build/vita-cmake (it caches the toolchain)"
+	@exit 1
 else
 	@mkdir -p build/vita
 	VITASDK=$(VITASDK_DIR) PATH="$(VITASDK_DIR)/bin:$$PATH" \

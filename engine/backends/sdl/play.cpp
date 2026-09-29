@@ -250,7 +250,8 @@ void drawSubtitle(omk::Surface& fb, const omk::TextLayout& lay,
                   const std::vector<std::string>& menu, int selected,
                   int dispW, int dispH, int inset640 = 32,
                   SubBox box = SubBox::None, char face = 'J',
-                  int scroll = 0, int* overflowOut = nullptr) {
+                  int scroll = 0, int* overflowOut = nullptr,
+                  bool mediaLine = false) {
     // 32 is `Dialog_TickUI`'s block; `Subtitle_Show` (0x0041E040) lays a
     // `media.play` line out inset 16 - the caller says which.
     const int inset = inset640 * dispW / 640;
@@ -352,7 +353,18 @@ void drawSubtitle(omk::Surface& fb, const omk::TextLayout& lay,
     // `dword_6A52C4 = v18 - dword_907975` - and each row gets its own
     // `Text_DrawBlock(v40, v35, v42, v35 + v36, ...)`, so it grows upward and
     // is not clipped.
-    const bool fixedBlock = menu.empty();
+    //
+    // A `media.play` LINE is neither: `Subtitle_Show` (0x0041E040) lays it out
+    // over the whole screen height and parks it by its OWN height,
+    //
+    //     g_SubtitleY = SCREEN_H - Text_DrawBlock(16, 0, W - 16, H, text) - 16
+    //
+    // so a long one grows upward and is never clipped, scrolled or arrowed.
+    // Drawn through the dialogue's fixed block instead, the robot's 17-second
+    // notice in the alley ("Vous avez ete victime d'une agression...") lost
+    // its tail behind a red arrow nothing could scroll - it is a cutscene
+    // (a reader, 2026-09-29).
+    const bool fixedBlock = menu.empty() && !mediaLine;
     const int overflow = (fixedBlock && stackH > blockH) ? stackH - blockH : 0;
     if (overflowOut) *overflowOut = overflow;
     if (scroll < 0) scroll = 0;
@@ -371,8 +383,9 @@ void drawSubtitle(omk::Surface& fb, const omk::TextLayout& lay,
     // reader photographed with a single reply.
     // The line's text top is `a2 - 4` (`v6 -= 4`), with `a2 = height -
     // height*64/480`; the reply stack ends on the box's bottom edge.
-    const int clipTop = fixedBlock ? dispH - blockH - 4 : dispH - 18 - stackH;
-    const int clipBot = fixedBlock ? clipTop + blockH : dispH - 18;
+    const int clipTop = fixedBlock ? dispH - blockH - 4
+                      : mediaLine  ? dispH - 16 - stackH : dispH - 18 - stackH;
+    const int clipBot = fixedBlock ? clipTop + blockH : mediaLine ? dispH - 16 : dispH - 18;
     int y = clipTop - scroll;
     drawSubtitleBox(fb, box, clipTop, dispW, dispH);
     // THE SCROLL ARROWS - red, flashing, at the right edge. `sub_4400D0`
@@ -2313,12 +2326,14 @@ int main(int argc, char** argv) {
     const auto enh = [&](int flag, int fromSettings, int top) {
         return flag >= 0 ? flag : enhanceAll ? top : fromSettings;
     };
-    const int shadowQuality = enh(shadowQFlag, settings.shadowQuality,
-                                  omk::kMaxShadowQuality);
+    // not const: a renderer that cannot draw an enhancement refuses it, once
+    // the renderer exists (below `world`)
+    int shadowQuality = enh(shadowQFlag, settings.shadowQuality,
+                            omk::kMaxShadowQuality);
     const int  shadowDetail = detailFlag >= 0 ? detailFlag : settings.v.levelOfDetail;
     // Row 7. Per pixel ALSO widens who receives: the engine lights the
     // procedural crowd and nothing else, and this lets every character.
-    const int  lighting = enh(lightingFlag, settings.lighting, omk::kMaxLighting);
+    int        lighting = enh(lightingFlag, settings.lighting, omk::kMaxLighting);
     if (lighting > 0)
         std::printf("lighting: per pixel - an ENHANCEMENT the original never had "
                     "(it lights the crowd alone, per vertex); every character receives\n");
@@ -5291,6 +5306,22 @@ int main(int argc, char** argv) {
                          : glRen ? *glRen
                          : worldVk ? *worldVk
                                    : static_cast<omk::Renderer&>(worldSw);
+    // THE ENHANCEMENTS THIS RENDERER CANNOT DRAW, refused here rather than
+    // prepared every frame for nothing: each one also turns off what it
+    // replaces, so an undrawn per-pixel light left the crowd UNLIT and an
+    // undrawn shadow map left every body SHADOWLESS - the Vita, 2026-09-29,
+    // whose shared config asked for both. Mapped falls back to fitted, the
+    // best of the shadows every backend draws (they are geometry).
+    if (lighting > 0 && !world.drawsPixelLights()) {
+        std::printf("lighting: per pixel REFUSED - the %s renderer does not draw it; "
+                    "per vertex, as the engine lights\n", world.name());
+        lighting = 0;
+    }
+    if (shadowQuality >= 2 && !world.drawsShadowMap()) {
+        std::printf("shadows: mapped REFUSED - the %s renderer has no shadow map; fitted\n",
+                    world.name());
+        shadowQuality = 1;
+    }
     bool worldReady = false;
     // THE SHOWN DECORS - one per resident slot, because TWO are drawn while
     // the player walks between areas. `Area_Transition`'s completion arm puts
@@ -5326,6 +5357,10 @@ int main(int argc, char** argv) {
         // them and the street's moving population receives them - the static
         // set is shaded by a colour baked into every vertex and needs none.
         std::vector<omk::Light3do> lights;
+        // its `0x40000000` meshes, the candidates `Sfx_BindAmbientEffects`
+        // matches against the resident `.sfx` - kept, because that file can
+        // arrive after the set does (the frame loop binds them)
+        std::vector<omk::SceneRunner::SetEmitterMesh> emitters;
         std::vector<omk::Corner> baseCorners;
         // THE VISIBLE-SET WALK's unit of work. `sub_48D3B0` walks the scene
         // MESH BY MESH and submits each one that passes; this port flattens a
@@ -5544,9 +5579,12 @@ int main(int argc, char** argv) {
         // position: the neon, the steam, the smoke. They come up with the SET,
         // not with any object, which is why nothing started them and why they
         // had never appeared here. 319 across the 12 sets that have any.
-        if (const int n = session.sceneMutable().bindSetEmitters(d))
-            std::printf("world: slot %d %s binds %d ambient emitters\n",
-                        slot, stem.c_str(), n);
+        // BOUND IN THE FRAME LOOP, not here: walking in, the set loads while
+        // the OUTGOING scene is resident, and binding here put ANEKBAH's
+        // meshes against the Impasse's `.sfx` (102, the neon alone) in a pool
+        // that was about to be dropped, and the city's own `.SCX` then came up
+        // with none - the Bowie sequence's fire among them (2026-09-29).
+        w.emitters = omk::SceneRunner::setEmitterMeshes(d);
         // The Vulkan one is already initialised - its swapchain had to exist
         // before the window could be presented to at all.
         if (!worldReady) {
@@ -11944,6 +11982,20 @@ int main(int argc, char** argv) {
                                 ? session.scene().scene().scene().objects.size() : 0u);
             }
         }
+        // THE SET'S OWN EMITTERS, into the pool that owns them: whenever the
+        // resident runner has attached a `.sfx` and not yet been bound, and the
+        // set of ITS area is loaded. `Area_LoadScx` binds as the `.SCX` lands,
+        // against that area's set - which is the pairing this keeps, whichever
+        // of the two a transition brings in first.
+        if (session.scene().loaded() && !session.scene().setEmittersBound())
+            for (const WorldSlot& ws : worldSlots) {
+                if (ws.stem.empty() || ws.area != session.sceneArea()) continue;
+                const int bound = session.sceneMutable().bindSetEmitters(ws.emitters);
+                if (bound > 0)
+                    std::printf("world: frame %ld  %s binds %d ambient emitters into %s\n",
+                                n, ws.stem.c_str(), bound, session.scene().file().c_str());
+                break;
+            }
 
         // The absolute world cameras the script has set, as rays. Collected
         // BEFORE the character is staged, because `character.show` and the two
@@ -20619,7 +20671,7 @@ int main(int argc, char** argv) {
             const auto ptMedia = omk::parseMarkup(mediaText, 'V');
             if (!drawPositioned(fb, lay, ptMedia, dispW, dispH))
                 drawSubtitle(fb, lay, mediaText, {}, -1, dispW, dispH, 16,
-                             SubBox::None, 'V');
+                             SubBox::None, 'V', 0, nullptr, /*mediaLine*/ true);
             --mediaTextFrames;
         }
         // The subtitle goes over whatever the frame already holds - which
@@ -20775,16 +20827,19 @@ int main(int argc, char** argv) {
                         const float t = band > 1 ? static_cast<float>(d) / static_cast<float>(band - 1)
                                                  : 1.0f;
                         const int grey = outer + static_cast<int>((inner - outer) * t);
+                        // `v * grey / 255` for every byte, once a ROW: the
+                        // same law, four lookups a pixel instead of four
+                        // multiply-divides (the console's A9, 2026-09-29)
+                        std::uint8_t scale[256];
+                        for (int v = 0; v < 256; ++v) scale[v] = static_cast<std::uint8_t>(v * grey / 255);
+                        const std::size_t row0 = static_cast<std::size_t>(y) * static_cast<std::size_t>(fb.w);
                         for (int x = 0; x < fb.w; ++x) {
-                            const std::size_t ovI = static_cast<std::size_t>(y) *
-                                                        static_cast<std::size_t>(fb.w) +
-                                                    static_cast<std::size_t>(x);
+                            const std::size_t ovI = row0 + static_cast<std::size_t>(x);
                             const bool ovKey = g_ov.on && fb.px[ovI] == kOverlayKey;
-                            if (ovKey) { g_ov.row(ovI); g_ov.m[ovI] = static_cast<std::uint8_t>(g_ov.m[ovI] * grey / 255); }
+                            if (ovKey) { g_ov.row(ovI); g_ov.m[ovI] = scale[g_ov.m[ovI]]; }
                             std::uint16_t& px = ovKey ? g_ov.c[ovI] : fb.px[ovI];
-                            int r = ((px >> 11) & 31) << 3, g = ((px >> 5) & 63) << 2,
-                                b = (px & 31) << 3;
-                            r = r * grey / 255; g = g * grey / 255; b = b * grey / 255;
+                            const int r = scale[((px >> 11) & 31) << 3], g = scale[((px >> 5) & 63) << 2],
+                                      b = scale[(px & 31) << 3];
                             px = static_cast<std::uint16_t>(((r >> 3) << 11) |
                                                             ((g >> 2) << 5) | (b >> 3));
                         }

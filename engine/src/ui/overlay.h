@@ -30,15 +30,24 @@ struct OverlayPlanes {
     std::vector<std::uint16_t> c;
     std::vector<std::uint8_t>  m;
     std::vector<std::uint8_t>  rowInit;
+    // the row the last `row` call landed in, [lo, hi) as pixel indices: every
+    // pass walks the frame row by row, so this spares the DIVIDE per pixel -
+    // which the Vita's Cortex-A9 has no instruction for (a library call; the
+    // black fade's bands alone cost 46-57 ms a frame on a console, 2026-09-29)
+    std::size_t lo = 1, hi = 0;
     void begin(int width, int height) {
         on = true;
         w = width;
         const std::size_t count = static_cast<std::size_t>(width) * height;
         if (c.size() != count) { c.assign(count, 0); m.assign(count, 255); }
         rowInit.assign(static_cast<std::size_t>(height), 0);
+        lo = 1; hi = 0;
     }
     void row(std::size_t index) {
+        if (index >= lo && index < hi) return;   // initialised by the call that set them
         const std::size_t y = index / static_cast<std::size_t>(w);
+        lo = y * static_cast<std::size_t>(w);
+        hi = lo + static_cast<std::size_t>(w);
         if (rowInit[y]) return;
         rowInit[y] = 1;
         std::fill(c.begin() + y * w, c.begin() + (y + 1) * w, std::uint16_t(0));
@@ -46,10 +55,12 @@ struct OverlayPlanes {
     }
 };
 
-// the one set of planes, off unless a frontend began an overlay frame
-inline OverlayPlanes& overlayPlanes() {
-    static OverlayPlanes planes;
-    return planes;
-}
+// the one set of planes, off unless a frontend began an overlay frame.
+// At NAMESPACE scope, not a function-local static: the passes call this per
+// PIXEL, and a local static with a constructor is a thread-safe guard on every
+// call - five `dmb ish` barriers in the subtitle box's pixel loop on the Vita
+// (read in its object, 2026-09-29). Nothing touches it before `main`.
+inline OverlayPlanes g_overlayPlanes;
+inline OverlayPlanes& overlayPlanes() { return g_overlayPlanes; }
 
 }  // namespace omk

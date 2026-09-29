@@ -455,6 +455,12 @@ private:
     long             clockMs_ = 0;
     int              dw_ = 640, dh_ = 480;
     int              filter_ = 0;   // the scaling enhancement; 0 is the game's
+    mutable Surface  cloudSurf_;    // the cloud's 640x480 surface, for the filtered path
+    // the load panel's picture, decoded once per (file, slot, write)
+    mutable std::string                thumbPath_;
+    mutable int                        thumbSlot_ = -1;
+    mutable std::uint32_t              thumbWrites_ = 0;
+    mutable std::vector<std::uint16_t> thumbPx_;
     // `sub_432940`'s three globals, shared by every interference box drawn.
     mutable UiInterference noise_;
     // THE SCREEN'S SHEET AND STRINGS, loaded once per screen rather than per

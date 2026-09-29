@@ -102,6 +102,14 @@ public:
     // (docs/BOOT.md 4) and these phases are per-frame steps, so this is a
     // count and not a duration.
     void draw(Surface& fb, long frame) const;
+    // ...and straight into a display of ANY size, as the 640x480 frame then a
+    // NEAREST `blt` onto `fb` would have left it, byte for byte: each output
+    // pixel reads the work buffer at the source pixel the blit's column and
+    // row rule (`x * 640 / w`, `y * 480 / h`) picks. The original computes the
+    // effect at 640x480 and blits it; this skips the intermediate surface and
+    // its second pass (the Vita's start menu, 2026-09-29). -> false if the
+    // cloud is not loaded.
+    bool drawScaled(Surface& fb, long frame) const;
 
     // The 64 colours, for a check to look at.
     const std::vector<std::uint16_t>& ramp() const { return ramp_; }
@@ -110,6 +118,11 @@ public:
 private:
     std::vector<std::uint8_t>  tex_;    // 256x256, the cloud's own indices
     std::vector<std::uint16_t> ramp_;   // 64 entries, RGB565
+    // the frame's 256x256 emboss and its two warp tables - the 0x20000 buffer
+    // `sub_4B19C0` mallocs ONCE, at open; reused here rather than per frame
+    mutable std::vector<std::uint16_t> buf_;
+    mutable std::uint8_t colTab_[640] = {}, rowTab_[480] = {};
+    void prepare(long frame) const;      // pass 1 and the tables, into the three above
 };
 
 }  // namespace omk

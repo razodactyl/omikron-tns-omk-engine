@@ -1755,6 +1755,84 @@ it (software 90 and 300 frames, 320x240, GLES 60/150/300 frames, all
 identical with 0 and 40-60 ms of sleep a frame), so it is noted here rather
 than changed.
 
+### 28. The port against the ORIGINAL on the console - where it does more (2026-09-29)
+
+From the reader's console log `omk-play-20260929-205655.log` (default build,
+GPU posing DROPPED by the self-test, see `vita-port.md` 2026-09-29) and four
+read-only comparisons of each section against the original's code. "READ" is
+the original's code at the address; ms are the console's, per frame unless
+said. The original's model throughout: one rigid 3x3 per visible mesh, each
+unique vertex transformed ONCE into a `D3DTLVERTEX` (`sub_494650`,
+`sub_4947F0`), bodies culled whole before any of it, interface blits and
+blended quads on the card, sound mixed by DirectSound at 22050, loads spread
+over frames by an async reader.
+
+Ranked by what it would save, with what is already done marked:
+
+| # | where | the port | the original (READ) | ms | fix |
+|---|---|---|---|---|---|
+| a | bodies: `staged skin` 19, `ped apply` 22, and ~29 of `world begin..end` | every body posed on the CPU (two `qrot` a corner, position AND normal, then a second pass for yaw/offset), then re-uploaded whole: 53 uploads, 7.1 MB, 34 ms; vitaGL's `glBufferSubData` on a buffer drawn in the last 4 frames allocates a new one and copies (`buffers.c:474-500`), into UNCACHED memory | `sub_4947F0`: each unique vertex once (200 in PSH_FN against 1143 corners), no normal work when the body is unlit | ~60-70 | **the self-test fix** (`int(floor(aSlot + 0.5))`, built, awaiting the console); CPU fallback: fold yaw/offset into the per-mesh affine, one pass, normals only when a light reaches, a streaming buffer skinned into directly |
+| b | start menu `screen draw` 73 | the cloud computed at 640x480 into a NEW 614 KB surface every frame (`screendraw.cpp:363-376`), a new 128 KB work buffer (`cloud.cpp:88`), then a nearest STRETCH of 522K pixels to 960x544 | `sub_4B19C0` allocates both once, at open; `sub_4B1B00` does the two passes; the blit is 1:1 at 640x480 | ~40-50 | buffers as members; the warp and stretch fused into one pass (byte-identical); or the 640x480 cloud as a GPU texture |
+| c | `dialogue text` 28-34 | the subtitle box per pixel on the CPU; `overlayPlanes()` called 5x a pixel, a function-local static: `__cxa_guard_acquire` and FIVE `dmb ish` barriers in the loop (read in the Vita object); plus the per-pixel divide (fixed) | `sub_4400D0`: ONE `I2D_SubmitQuad`, mode 2/4, layer 10 - a blended D3D quad | ~20-30 | hoist `OverlayPlanes&` out of the loops (also `fillQuad`, `surface.cpp`, `hudbar.cpp`); or the box as a GPU quad under the overlay blend |
+| d | moving set meshes: meshes placed 7, grids rebuilt 7, soups patched <4.5, partial upload 4-5 | the set baked into world corners and soups, so 8229 moving corners (5 Cargo, 3 Mirador, tete03, 9 Epale, 15 CA*) and 2730 collision triangles rewritten, two grid layers rebuilt, 69 buffer patches - every frame | `o3de_SetNodePos` (0x004370A0) writes 3 floats; the vertex pass runs anyway; collision per-mesh spheres (`o3de_ForEachMeshInBox` 0x004430A0) with the probe moved into the mesh's frame (`sub_4434B0`) - no grid, no rewrite | ~18-20 | a moving mesh drawn from rest corners with one matrix (the posed program, one slot); collision in the mesh's local frame against a per-mesh soup built once. Note: the patches overwrite ranges the GPU may still read |
+| e | music track switch: `controller` 166/360/445 ms | `music.cpp:36` counts the resampled length one frame at a time, `while (size_t(n*step) < frames) ++n` - 6.3M double multiplies for track 3 (fits three tracks at ~55 ns a pass) | `Music_PlayTrack` 0x0041E110 queues the read; nothing counts samples | 150-430 once | closed form `ceil(frames/step)`, corrected by +-1 on the same predicate - byte-identical |
+| f | area change: 1-2.5 s over 2-3 frames | `loadWorldSlot` reads .3DO + .3DT whole, builds geometry, decodes textures, four soups in ONE frame; `completeLoad` the next | `Async_LoadDuringFrame`: a 64-request queue, ONE 128 KB chunk a frame (`sub_41F320` from `Game_Tick` 0x004200F0); `Area_TickLoad` 0x0040C7E0 waits on `sub_41EFA0` | 1000-2500 once | reads through `FileFetch` from `areaLoad`, geometry and soups on a worker, uploads spread. `Music_SetFadeMode` 0x0041EFF0 is the async mode/chunk setter - rename |
+| g | each line start: 133-295 ms (345 the first) | the whole .3DM read (3.4 MB, of which ~340 KB audio), decoded whole with `push_back`, COPIED into `speakerMorph` (`play.cpp:10597`), then resampled to 44100 float stereo (10.8 MB for 30 s) on the main thread | `Morph_Open` + `sub_42D960`: mmio walk, small rings, ADPCM decoded straight into a 22050 DirectSound buffer every 15 ms on the timer thread | 130-300 once | device at 22050 (no resample at all); decode in the read-ahead thread; share the bytes |
+| h | `lights` 5 | per-pixel light lists and mapped-shadow slabs built for the GLES renderer, which implements NEITHER (`glesrender.cpp:35-39`) - the console's `omk.ini` has both on | `sub_4380B0` registers street life in "Lights Collisions"; per vertex, street life only; no shadow map | ~5, only with the enhancements ON | NOT a port inefficiency: both are ENHANCEMENTS, off by default in every backend, and the preparation is already gated on them (`lighting > 0`, `shadowQuality >= 2`); the console paid it because its `omk.ini` turns them on, and GLES draws neither. Fix: a renderer that cannot draw an enhancement REFUSES it at start-up with a log line (a capability query on `Renderer`), so a config shared with the Mac cannot cost the console; meanwhile take them out of the Vita's `omk.ini` |
+| i | music per frame 2-10 | `pull` per output frame at 44100 (double multiply, `at()`, two `push_back`), a synchronous 32 KB read every 1.5 s, the mutex held over the callback | decoded on the winmm timer thread at 22050, mixed by DirectSound (`sub_46C3A0`) | 2-10 | 22050 S16 device; decode in the callback or a stream thread |
+| j | bodies: no frustum cull | staged bodies skip on distance only (`play.cpp:15944-15963`), walkers on a 40 m sphere; `composePose` runs for all 25 before the skip | far distance + four planes on the root sphere before any animation (0x0048D7F0, 0x0048D3B0); an npc's shadow gated on having been transformed (`Actors_TickAll` 0x004681C0) | 30-60% of (a) before the GPU fix, 1-3 after | a frustum from the view, tested at both skip points; compose after the cull where only drawing reads the pose |
+| k | crowd LOD not applied: `ped compose` 2-2.5 | always LOD0, and `composePose` poses all 76 meshes of a crowd model (+ a sort) | `sub_453A70` sorts the four skeletons, `sub_453910` chains them at 10/20/30/40 m (`dword_4C8870`), `sub_48D7F0` walks the chain by view depth and binds that level's tracks | 4-6 before, ~1 after | pick the level by the same rule, compose its 19 meshes. Caveat: past 40 m the original keeps the last level to the clip distance - the port's 40 m cut draws FEWER walkers |
+| l | fixed per-body lookups, `staged resolve` 2.9 | `hasSeveralSkeletons` (76x76), `headMeshOf` (O(n^2) + strings, twice), the parent table, per body per frame | bound once in `Actor_LoadModel` 0x0041A730 (actor slots 3..19) | 1-2 | cache per model, as step 19 did for the walkers |
+| m | `playSound` / `sounds` 9-29 spikes | each play copies the cached float sample (~1 MB for 3 s) under the lock; the cache clears on every scene change | `Sound_Play3D` 0x0046CDC0: `DuplicateSoundBuffer`, shared memory | spikes | shared int16 samples at 22050 |
+| n | load panel (not in this log) | `DataFs::readPath` of the whole GAMES file (~8.4 MB) EVERY FRAME while a row is selected (`screendraw.cpp:568-569`) | the picture read when the selection moves | 100s? | cache per (path, slot) |
+| o | start menu present 10-15 | `presentSurface` uploads the whole 960x544 surface each frame with `glTexSubImage2D` (vitaGL copies a recently used texture first) | a DirectDraw flip | 10-15 | the overlay's direct-pointer, changed-rows sync |
+| - | `fades, flicker` 46-57 | the black fade's bands: a runtime divide per pixel in `OverlayPlanes::row` | the ticker's two quads | 46-57 | **DONE** (row cache + per-row table), awaiting the console |
+
+**What the enhancement settings cost on the Vita**: the GPU side NOTHING -
+the GLES backend implements none of MSAA, filtering, anisotropy, per-pixel
+light or mapped shadows - but with the last two ON in its `omk.ini` the CPU
+still prepares them (row h). With the defaults it prepares nothing.
+
+**The device rate** is 44100 only because the films are 44100 MP2 and
+`openAudio` keeps the first device it opened (`play.cpp:5635/5833`). 22050 is
+the original's and removes rows g's resample, half of i and m's conversions;
+48000 has no cheap ratio from 22050 (320/147). Reopen after the films (mind
+the "movie audio under the next" fault at `play.cpp:815`) or decimate the
+films 2:1.
+
+**The cheap exact ones - DONE 2026-09-29** (built into the VPK, not yet run
+on the console):
+- **c**: `overlayPlanes()` returns a namespace-scope object (`ui/overlay.h`),
+  so no call pays a guard - `drawSubtitleBox`'s Vita object went from five
+  `dmb ish` and repeated `__cxa_guard_acquire` to none. Every caller of the
+  planes benefits (`fillQuad`, the 50% blits, the HUD bars). The box region
+  of a 960x544 conversation frame is byte-identical to the build before
+  (67379 drawn pixels, 0 differ; the talker's own pixels vary run to run).
+- **e**: the music length from `ceil(frames / step)` nudged on the same
+  predicate - 0 mismatches against the loop over 6 device rates x 500 lengths.
+- **b**: the cloud's buffers kept on `MenuCloud` (as `sub_4B19C0` keeps its
+  own), and at any display but 640x480 the effect is written straight onto
+  `fb` at the pixels a NEAREST `blt` would have read (`MenuCloud::drawScaled`);
+  the filtered enhancement keeps the two steps on a kept surface. Start menu at
+  960x544, frames 10 and 47: byte-identical to before.
+- **h**: `Renderer::drawsPixelLights()` / `drawsShadowMap()` (Vulkan yes, the
+  rest no); `omk-play` REFUSES the enhancement at start-up with a line, mapped
+  falling back to fitted. This fixed two faults beside the 5 ms: each
+  enhancement switches off what it replaces, so on the Vita, whose config asked
+  for both, the CROWD WAS UNLIT (`lit = lightCrowd && lighting == 0`) and NO
+  BODY CAST A SHADOW (the classic shadows run only below mapped).
+- **n**: the load panel decodes a slot's picture once per (file, slot, write) -
+  `saveFileWrites()` counts `writeSaveFile`, so a save or a delete refreshes it.
+
+**Order proposed**: confirm the self-test on the console (a); then the cheap
+exact ones - c's hoist, e's closed form, b's buffers and fused pass, h's skip,
+n's cache; then j and k (the cull and the LOD, both the original's mechanism);
+then d (moving meshes as matrices) and the 22050 device (g, i, m); then f (the
+async area load). Evidence notes: (a)'s split of the 34 ms is a fit over three
+frames; (b), (c) and (d)'s shares are pixel/corner counts, not profiles; (d)'s
+7 ms a section is ~40x the M3's figure and not explained by arithmetic alone -
+record `motionPatch0` (declared at `play.cpp:6497`, never recorded) first.
+
 ## What is NOT in scope
 
 * The software renderer's speed. It is the reference and a comparison tool;

@@ -15,6 +15,30 @@ waiting on its evidence.
 
 ## Open (batch 7, filed 2026-09-09)
 
+### 98. A `media.play` line was laid out as a DIALOGUE line: clipped, with a scroll arrow nothing could move — A
+
+> **FIXED 2026-09-29, NOT YET PLAYED.** The reader (Vita,
+> `omk-play-20260929-234209.log`): the robot's notice in the alley cutscene,
+> *"Vous avez ete victime d'une agression a caractere violent..."* (`media.play
+> 141`, ZVO M010), was *"considered as a dialog subtitle so part of it is
+> clamped in a scroll zone (with the red scroll arrow), which can not be moved
+> since it is a cutscene"*.
+
+**Cause.** `drawSubtitle` gave every line with no reply menu the DIALOGUE's
+fixed block (`Dialog_TickUI`: `height - height*64/480`, the overflow hidden
+below and scrolled by the player, the arrows showing which way). A `media.play`
+line is `Subtitle_Show` (0x0041E040), which lays the text over the whole
+screen height and parks it by its OWN height -
+`g_SubtitleY = SCREEN_H - Text_DrawBlock(16, 0, W - 16, H, text) - 16` - so a
+long one grows upward and is never clipped. The display time was already its
+`80 ms * strlen`, floor 2 s.
+
+**Fix.** `drawSubtitle(..., mediaLine = true)` for the media line: block top
+`dispH - 16 - height`, no overflow, no arrows. Headless (`--area 222
+--scene-chunk 55 --frames 1200`, 960x544): the line now shows all three rows
+("...remercie pour votre collaboration."); before, two, cut at "La police
+d'Omikron vous".
+
 ### 97. The supermarket shoot phase blocks at the end of its cutscene, and Kay'l vanishes — A
 
 > **CONFIRMED IN PLAY 2026-09-10: *"camera height is good now"*.** So the

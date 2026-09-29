@@ -43,7 +43,10 @@ scripts/vita-movies.sh          # -> engine/build/vita-movies/{EIDOS,QUANTIC,GAM
 scripts/vita3k-run.sh game 45   # the emulator; setup | bench | smoke | game [seconds]
 ```
 
-VitaSDK is at `~/vitasdk`; vitaGL is OUR build (`scripts/vita-vitagl.sh`,
+VitaSDK is at `~/vitasdk` (`~/.zprofile` exports it; until 2026-09-29 it
+exported `/usr/local/vitasdk`, a 2021 SDK with no `psp2/avplayer.h` and an older
+vitaGL API, which the Makefile preferred - `make vita` now refuses such an SDK by
+name). vitaGL is OUR build (`scripts/vita-vitagl.sh`,
 `engine/build/vitagl/`, no splash, Vita3K support) - the vdpm one opens a second
 GXM context the emulator cannot take. Vita3K needs `VITA3K_ARGS="-B OpenGL"`;
 its Vulkan backend crashes on vitaGL.
@@ -135,6 +138,23 @@ neon build"* - logs `omk-play-20260926-003535.log` (pre-NEON),
 `omk-play-20260926-003919.log` (NEON) and the core dump
 `psp2core-1790376118-0x00009425ab-eboot.bin.psp2dmp`.
 
+## 3b4. The reader, 2026-09-29: the Bowie sequence slow, and no fire
+
+*"Still laggy, especially the intro cutscene [the Bowie title sequence] ...
+only a fire normally, but the fire effect doesn't work here, it is working on
+the vulkan backend"* - `omk-play-20260929-205655.log`. Three causes, all in
+`vita-port.md`'s 2026-09-29 entry: the pose self-test still dropping the GPU
+posing (the real cause is `int()` ROUNDING on the Vita, not the row stride),
+the set's emitters bound into the outgoing pool on a walk-in (the city had
+none of its 153 - not a GLES fault), and a per-pixel divide in the overlay
+planes (the fade's 46-57 ms). Fixed, built, not yet run on the console.
+The same evening, the cheap exact fixes of `optimization.md` step 28 (the
+subtitle box's barriers, the music's counting loop, the menu cloud, the load
+panel's 8.4 MB read a frame) - and the finding that the console's `omk.ini`
+enhancements had left the CROWD UNLIT and EVERY BODY SHADOWLESS on GLES,
+which cannot draw per-pixel light or a shadow map: now refused at start-up
+(`lighting: per pixel REFUSED`, `shadows: mapped REFUSED ... fitted`).
+
 ## 3c. The transition hitches (2026-09-23)
 
 Not model RE-loads (0 in the fight, the shoot phase and Telis's scene); the
@@ -218,6 +238,11 @@ the Vita work so far was verified with `--only` over `engine: vita bench`,
   `fileSize` / `makeDirectories` (`platform/datafs.h`), which are `sceIo` there.
 * **newlib's printf has no `%zu`/`%td`**: `printf_c99.cpp` wraps the printf
   family and strips the length modifier. Do not assume a format "just works".
+* **`int()` in a Vita shader ROUNDS (half to even), it does not truncate** -
+  `int(k + 0.5)` is `k + 1` for odd `k`. `floor` first (2026-09-29; it was the
+  pose self-test's "odd slots", misread for two days as a row-stride rule).
+* **The A9 has no integer DIVIDE**: a `/` by a runtime value is a library
+  call. Keep it out of per-pixel loops (the overlay planes' `row`, 2026-09-29).
 * **vitaGL overflows uniform ARRAYS** - use separate `vec4`s (`uWave0..7`).
 * **The heap**: 192 MB (`_newlib_heap_size_user`); 300 MB was refused on the
   console and aborted on the first allocation.

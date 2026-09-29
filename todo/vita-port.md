@@ -1412,3 +1412,56 @@ cache when the resident scene changes), and `wavToDevice` writes an exact
 swap caught; the supermarket fight's frame and its 31 sound lines identical
 to the pre-NEON build; stop sound, audio queue bound, scene/actor sounds,
 audio, shoot fire green.
+
+### 2026-09-29: the Bowie sequence - slow, and no fire; the self-test's REAL cause
+
+The reader (`omk-play-20260929-205655.log`, the default build): *"Still
+laggy, especially the intro cutscene which is especially slow despite having
+almost nothing to show in the first camera (only a fire normally, but the
+fire effect doesn't work here, it is working on the vulkan backend)"* - the
+intro cutscene being the Bowie title sequence (AREA 0 record 78, track 3,
+first camera `cam Bowie Flamme`, frame 3503 of that run).
+
+**The pose self-test failed again, odd slots exactly** - so the 4-rows-a-slot
+fix above was answering the wrong question. At 3 and at 4 rows alike every
+odd slot vanished and every even one was right: the shader's
+`int(aSlot + 0.5)` is ROUNDED on the Vita, half to even, so `k + 0.5` is
+`k + 1` for every odd `k` - each odd bar took its even neighbour's affine and
+was overdrawn by it. Now `int(floor(aSlot + 0.5))`. With the program dropped,
+every body was posed on the CPU: `staged skin` 19 ms and `ped apply` 21 ms a
+frame in Anekbah. **CONFIRMED on the console** (`omk-play-20260929-234209.log`):
+`32 of 32 slots moved, 32 of 32 turned - the renderer poses bodies`, every
+drawn staged body "posed by the renderer", `staged skin` 19 -> 0.3 ms and
+`ped apply` 22 -> 0.3 ms; Anekbah's sim+draw 110-124 -> 59-70 ms a frame.
+
+**The fire: not the GLES backend - the ORDER of a walk-in.** Walking from the
+airlock (142) into Anekbah the SET loads first, while AIMPASAS's pool is still
+resident, and `loadWorldSlot` bound its emitters at once - into that pool,
+against its `.sfx`: `ANEKBAH binds 102 ambient emitters` (the neon alone,
+where 153 is right). `anekbah.SCX` landed 17 frames later; `attachSfx`
+cleared the particle field and nothing bound the set again, so the city had
+NONE of its 153 set emitters - the Bowie flame among them. A `--area 0` or
+save start has the scene first, which is why the Vulkan run showed it. The
+set now keeps its candidates (`SceneRunner::setEmitterMeshes`) and the frame
+loop binds them into the resident runner whenever it has attached a `.sfx`
+and not yet been bound, from the slot of ITS area. Headless:
+`--area 142 --stand 7691,-79,3450,90 --hold "0*1,k200*290"` loads ANEKBAH
+before `anekbah.SCX` and now prints `ANEKBAH binds 153 ambient emitters into
+anekbah.SCX`. The Impasse walk-in (118 -> 222) had the same order.
+
+**The first 1.5 s of the sequence: `fades, flicker` 46-57 ms a frame** - the
+black fade's two letterbox bands, ~138k pixels at 960x544, each calling
+`OverlayPlanes::row`, whose `index / w` has a RUNTIME divisor: a library
+divide per pixel on the A9, which has no divide instruction. `row` now keeps
+the last row's [lo, hi) and divides once a row; the band loop takes its
+`v * grey / 255` from a per-row table (the same values, exact). The same
+`row` serves the subtitle boxes (`dialogue text` 28-34 ms in the
+conversations), `fillQuad`, the 50% blits and the HUD bars.
+
+Still open, same log: the city's steady ~120 ms - `world begin..end` 33-44,
+`staged bodies` 16-28, `pedestrians` 15-23 (both CPU skinning, above),
+scripted motion 14, lights 5. The console's `omk.ini` turns every
+ENHANCEMENT on (`aa 8`, trilinear, anisotropy 16, per-pixel lighting, mapped
+shadows); the GLES backend implements none of them, so they cost no GPU time -
+but the CPU still builds the light lists and shadow slabs (`lights`, ~5 ms).
+`optimization.md` step 28 has the whole comparison with the original.

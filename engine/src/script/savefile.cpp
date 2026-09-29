@@ -276,8 +276,12 @@ std::vector<std::byte> readSaveFile(const std::string& writablePath,
     return d;
 }
 
+namespace { std::uint32_t g_saveFileWrites = 0; }
+std::uint32_t saveFileWrites() { return g_saveFileWrites; }
+
 bool writeSaveFile(const std::string& path, std::span<const std::byte> file) {
     if (!safeOutputPath(path)) return false;
+    ++g_saveFileWrites;                  // before the write: a partial file is changed too
     const auto cut = path.find_last_of("/\\");
     if (cut != std::string::npos) makeDirectories(path.substr(0, cut));
     std::ofstream f(path, std::ios::binary | std::ios::trunc);

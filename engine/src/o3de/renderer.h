@@ -297,6 +297,15 @@ public:
     virtual bool posesBodies() const { return false; }
     // How many lights a posed draw may carry (`Draw::vertexLights`).
     virtual int maxVertexLights() const { return 0; }
+    // Whether the backend DRAWS two enhancements the frontend prepares for it:
+    // `View::lights` (per-pixel lighting) and `shadowPass` (mapped shadows).
+    // The frontend asks at start-up and REFUSES the enhancement when the
+    // answer is no - preparing it anyway cost the Vita ~5 ms a frame for a
+    // picture its GLES backend never drew, and worse, each one switches off
+    // what it replaces (the crowd's per-vertex light, the classic shadows),
+    // so an undrawn one left the crowd unlit and every body shadowless.
+    virtual bool drawsPixelLights() const { return false; }
+    virtual bool drawsShadowMap() const { return false; }
 
     // A NATIVE mirror pass, when the backend has one. -> false means "I do not
     // do this", and the boundary falls back to compositing on the CPU.

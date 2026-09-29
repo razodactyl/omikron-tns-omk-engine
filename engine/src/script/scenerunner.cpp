@@ -183,6 +183,7 @@ void SceneRunner::attachSfx(const std::string& dir, const std::string& name) {
     sfx_ = SfxFile{};
     fx_.clear();
     fired_ = 0;
+    setEmittersBound_ = false;           // the clear above took the set's emitters too
     const DataFs fs(dir);
     // ATTACH EVEN WHEN THERE IS NO `.SFX`, and this used to return first.
     // `attach` is what re-sizes the runner's per-piece state to the file it
@@ -219,12 +220,12 @@ void SceneRunner::attachSfx(const std::string& dir, const std::string& name) {
     firePieces(1, -1);
 }
 
-int SceneRunner::bindSetEmitters(std::span<const std::byte> modelData) {
-    if (!sfx_.valid) return 0;
+std::vector<SceneRunner::SetEmitterMesh>
+SceneRunner::setEmitterMeshes(std::span<const std::byte> modelData) {
+    std::vector<SetEmitterMesh> out;
     const auto hd = readHeader(modelData);
-    if (!hd) return 0;
+    if (!hd) return out;
     const auto meshes = readMeshes(modelData, *hd);
-    int n = 0;
     for (std::size_t i = 0; i < meshes.size(); ++i) {
         const auto& m = meshes[i];
         if (!(static_cast<std::uint32_t>(m.flags) & 0x40000000u)) continue;
@@ -232,14 +233,29 @@ int SceneRunner::bindSetEmitters(std::span<const std::byte> modelData) {
         // record is 140 bytes and its name starts at +16.
         const std::size_t at = static_cast<std::size_t>(hd->meshOff) + 140u * i + 16u;
         if (at + 4 > modelData.size()) continue;
-        std::uint32_t want = 0;
+        SetEmitterMesh e;
         for (int k = 0; k < 4; ++k)
-            want |= static_cast<std::uint32_t>(modelData[at + static_cast<std::size_t>(k)]) << (8 * k);
+            e.tag |= static_cast<std::uint32_t>(modelData[at + static_cast<std::size_t>(k)]) << (8 * k);
+        for (int k = 0; k < 3; ++k) e.pos[k] = m.pos[k];
+        out.push_back(e);
+    }
+    return out;
+}
+
+int SceneRunner::bindSetEmitters(std::span<const std::byte> modelData) {
+    return bindSetEmitters(setEmitterMeshes(modelData));
+}
+
+int SceneRunner::bindSetEmitters(std::span<const SetEmitterMesh> meshes) {
+    if (!sfx_.valid) return 0;
+    setEmittersBound_ = true;
+    int n = 0;
+    for (const auto& m : meshes) {
         for (const auto& b : sfx_.bindings) {
             std::uint32_t tag = 0;
             for (int k = 0; k < 4; ++k)
                 tag |= static_cast<std::uint32_t>(static_cast<unsigned char>(b.tag[k])) << (8 * k);
-            if (tag != want) continue;
+            if (tag != m.tag) continue;
             // A BINDING NAMES ITS EFFECT BY ID, NOT BY POSITION. Section C's
             // `+0` id is 1-based and does not track the array index: in
             // `anekbah.sfx` index 3 carries id **5** and is `neon`, so the

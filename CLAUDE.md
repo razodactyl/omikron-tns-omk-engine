@@ -604,7 +604,13 @@ engine/                the portable replica - level C, started 2026-08-30.
                        tool (~1500 translation units a build, minutes) and a
                        clean build is now ~11 s, a no-op 0.03 s. verify.py
                        runs `make -s` once per engine check, so the suite
-                       paid that too.
+                       paid that too. The VIEWERS followed on 2026-09-29:
+                       `make play` / `make play-gles` compiled play.cpp
+                       (~21 000 lines) into the binary on EVERY call - 35 s
+                       for a no-op on an M3, paid by every check that renders -
+                       and now build from per-variant objects under
+                       build/obj/play-{sw,vk,gles}/ with their own .d files:
+                       a no-op is 0.1-0.2 s, a touched header rebuilds.
                        **IT BOOTS**: `build/omk fr --tables tables` parses the
                        command line the way WinMain does, steps the three FLIS
                        movies, does Game_Start("aventure.scx") - which is the

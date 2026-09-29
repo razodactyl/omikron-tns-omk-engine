@@ -137,25 +137,60 @@ else
 	@echo "built build/run_vulkan and build/shadow_probe against $(VK_PKG)"
 endif
 
+# THE VIEWER IS BUILT FROM OBJECTS, like everything else (2026-09-29). `play`
+# used to compile `play.cpp` (~21 000 lines) and its renderer straight into the
+# binary on every invocation - a phony target with no object and no dependency
+# file, so `make` had nothing to compare and paid ~50 s each time, and every
+# `verify.py` check that renders ran `make -s play` first. Each variant now
+# compiles into its OWN object directory (the variants compile `play.cpp` with
+# different flags, so their objects must never mix), with `-MMD -MP` like the
+# engine objects, and `build/omk-play` / `build/omk-play-gles` are real file
+# targets. `play` and `play-gles` stay the entry points and print as before.
+PLAY_SW_DIR := $(OBJDIR)/play-sw
+PLAY_VK_DIR := $(OBJDIR)/play-vk
+PLAY_GL_DIR := $(OBJDIR)/play-gles
+PLAY_SW_FLAGS := $(SDL_CFLAGS) $(SDL_DEFS)
+PLAY_VK_FLAGS := $(SDL_CFLAGS) $(SDL_DEFS) $(VK_CFLAGS) -DOMK_VULKAN -Ibuild/shaders
+PLAY_GL_FLAGS := $(SDL_CFLAGS) $(SDL_DEFS) -DOMK_GLES
+PLAY_DEPS := $(wildcard $(PLAY_SW_DIR)/*.d $(PLAY_VK_DIR)/*.d $(PLAY_GL_DIR)/*.d)
+
+$(PLAY_SW_DIR)/play.o: backends/sdl/play.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PLAY_SW_FLAGS) -c -o $@ $<
+$(PLAY_VK_DIR)/play.o: backends/sdl/play.cpp | $(VK_SHADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PLAY_VK_FLAGS) -c -o $@ $<
+$(PLAY_VK_DIR)/vkrender.o: backends/vulkan/vkrender.cpp | $(VK_SHADERS)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PLAY_VK_FLAGS) -c -o $@ $<
+$(PLAY_GL_DIR)/play.o: backends/sdl/play.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PLAY_GL_FLAGS) -c -o $@ $<
+$(PLAY_GL_DIR)/glesrender.o: backends/gles/glesrender.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(PLAY_GL_FLAGS) -c -o $@ $<
+
+ifneq ($(SDL_PKG),)
+ifeq ($(VK_PKG)$(GLSLC),)
+build/omk-play: $(PLAY_SW_DIR)/play.o $(SRCOBJS)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(SDL_LIBS)
+PLAY_WITH := $(SDL_PKG) (no Vulkan - software renderer only)
+else
+build/omk-play: $(PLAY_VK_DIR)/play.o $(PLAY_VK_DIR)/vkrender.o $(SRCOBJS)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(SDL_LIBS) $(VK_LIBS)
+PLAY_WITH := $(SDL_PKG) + $(VK_PKG)
+endif
+endif
+
 .PHONY: play
-play: $(SRCOBJS)
+play: $(if $(SDL_PKG),build/omk-play)
 ifeq ($(SDL_PKG),)
 	@echo "no SDL found (pkg-config sdl3 or sdl2) - the frontend is optional;"
 	@echo "everything else builds and the suite passes without it (PORTING A8)."
 else
-	@mkdir -p build
-ifeq ($(VK_PKG)$(GLSLC),)
-	$(CXX) $(CXXFLAGS) $(SDL_CFLAGS) $(SDL_DEFS) -o build/omk-play \
-	    backends/sdl/play.cpp $(SRCOBJS) $(SDL_LIBS)
-	@echo "built build/omk-play against $(SDL_PKG) (no Vulkan - software renderer only)"
-else
-	@$(MAKE) -s $(VK_SHADERS)
-	$(CXX) $(CXXFLAGS) $(SDL_CFLAGS) $(SDL_DEFS) $(VK_CFLAGS) -DOMK_VULKAN \
-	    -Ibuild/shaders -o build/omk-play \
-	    backends/sdl/play.cpp backends/vulkan/vkrender.cpp $(SRCOBJS) \
-	    $(SDL_LIBS) $(VK_LIBS)
-	@echo "built build/omk-play against $(SDL_PKG) + $(VK_PKG)"
-endif
+	@echo "built build/omk-play against $(PLAY_WITH)"
 endif
 
 # ------------------------------------------------------------ THE PS VITA
@@ -221,15 +256,17 @@ build/gles_probe: backends/gles/gles_probe.cpp backends/gles/glesrender.cpp $(SR
 # drawn in a desktop window (macOS's legacy GL 2.1; `-lGLESv2` elsewhere).
 # Optional like `play`, and needs SDL the same way. `build/omk-play-gles`.
 GL_LIBS := $(if $(filter Darwin,$(UNAME_S)),-framework OpenGL,-lGLESv2)
+ifneq ($(SDL_PKG),)
+build/omk-play-gles: $(PLAY_GL_DIR)/play.o $(PLAY_GL_DIR)/glesrender.o $(SRCOBJS)
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(SDL_LIBS) $(GL_LIBS)
+endif
+
 .PHONY: play-gles
-play-gles: $(SRCOBJS)
+play-gles: $(if $(SDL_PKG),build/omk-play-gles)
 ifeq ($(SDL_PKG),)
 	@echo "no SDL found - the GLES frontend is optional (PORTING A8)."
 else
-	@mkdir -p build
-	$(CXX) $(CXXFLAGS) $(SDL_CFLAGS) $(SDL_DEFS) -DOMK_GLES -o build/omk-play-gles \
-	    backends/sdl/play.cpp backends/gles/glesrender.cpp $(SRCOBJS) \
-	    $(SDL_LIBS) $(GL_LIBS)
 	@echo "built build/omk-play-gles against $(SDL_PKG) + GL"
 endif
 
@@ -246,7 +283,7 @@ build/%: $(OBJDIR)/tools/%.o $(SRCOBJS)
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
--include $(DEPS)
+-include $(DEPS) $(PLAY_DEPS)
 
 clean:
 	rm -rf build

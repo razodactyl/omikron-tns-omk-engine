@@ -86,6 +86,12 @@
 __pycache__/
 *.pyc
 
+# --- (B) the book's intermediate HTML ---------------------------------------
+# `python3 book/build.py` writes omk-book.md, .html and .pdf; the .md and the
+# .pdf are committed on purpose (book/README.md), the .html is only the step
+# between them.
+/book/omk-book.html
+
 # --- (C) stale manual backups - git history replaces these ----------------
 /010926/
 /270826_1719/

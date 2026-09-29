@@ -75,7 +75,7 @@ not a CPU figure). Against the original's 32 MB, both are the port's.
 | 17 | C1: the GLES SUBMIT - state that has not changed is not set again (blend, depth mask, texture, uniforms, attributes), and a buffer's dirty runs a small gap apart go in one write | **the state cache DONE** 2026-09-29 - exact (probe and street, same binary); 1809 -> 92 state calls over 248 draws a frame; `engine: gles state cache`. **The run merge REFUTED and not committed** - it assumed the dirty list sorted, and it is not; see "25." below |
 | 25 | ~~the GLES dirty upload draws a different street from a full upload~~ | **CLOSED 2026-09-29 - NOT A BUG, and the finding was mine**: the different street came from step 17's own uncommitted run merge. The dirty list is complete and the partial upload exact (`OMK_DIRTY_AUDIT`); see "25." below |
 | 26 | RAM/GPU: `GlesRenderer::vbo_` / `poseVbo_` are keyed by `Geometry*` and never release a buffer - a geometry that is gone keeps its GPU buffer for the process's life | open |
-| 18 | C3: the engine's per-frame HEAP churn, ~600 allocations and ~2.4 MB a frame - the sites listed in step 15 | open |
+| 18 | C3: the engine's per-frame HEAP churn, ~600 allocations and ~2.4 MB a frame - the sites listed in step 15 | **DONE** 2026-09-29 - 1214 -> 651 allocations a frame in the software street (-46%), and outside the software rasterizer ~724 -> ~160 (-78%); every step byte-identical; see "18." below |
 | 19 | C4: per-body lookups that never change - foot bones, `charModelFor`/`lodRestFor`, `skeletonRootOf`, shadow bone meshes, `composePose`'s parent table - cached per model or body | open |
 | 20 | C7: the Vita's flags - `-mcpu=cortex-a9`, LTO - against `omk_bench` | open |
 | 21 | C8: the VM's per-instruction `getenv` and operand vector (cutscenes and transitions only - the steady street runs ~50 instructions in 150 frames) | open |
@@ -1563,6 +1563,55 @@ not committed.** Two reasons, each enough alone:
 **Step 25** was opened here on the strength of a street frame that drew
 537 pixels differently with whole and partial uploads. It is CLOSED as not a
 bug - the next section says why, and why the evidence for it was wrong.
+
+### 18. The frame's heap allocations - 2026-09-29, on an M3
+
+**Measured, not guessed.** The GLES build's allocations are ~85% the macOS
+GL driver's, so the count is taken in the SOFTWARE build (dummy video,
+`--res 320x240`): a malloc interposer counts every allocation over a 100-frame
+and a 400-frame street run, and the difference over 300 frames is the steady
+state. A sampling interposer (1 in 31, 18-frame backtraces) against a `-g`
+build of `play.cpp` with `dsymutil`, symbolised with `atos -i`, attributed
+them - and attributed by the innermost `omk::` function, because line numbers
+alone send every allocation inside an object built without `-g` to its call
+site in `play.cpp`.
+
+| site | share of the frame's allocations | what it was | now |
+|---|---|---|---|
+| `SoftwareRenderer::submit` | 40% (76% of the bytes) | the reference rasterizer's own - **not the Vita's**, and out of scope | untouched |
+| `Program::chain` | 22% | a `std::vector` and a `std::set` (a node an element) every tick of every program | a by-value buffer, 16 inline; "seen" is a scan of what is already out |
+| `applyLights` | 11% | three vectors and 768 ramp entries per reaching light per body | one 256 x 256 ramp built at load, the lights 32 inline |
+| `shadowBonesFor` | 6% | its list built per body per frame | four tables built once |
+| the motion patch, `motionAt` | 6% | two maps rebuilt every frame | scratch vectors; the patches sorted by mesh index before the walk |
+| `particleGeometry` | 3% (12% of the bytes) | a map of vectors, every corner copied twice | scratch kept across frames, batches key by ascending key |
+
+| software street, 300 frames, M3 | before | after |
+|---|---|---|
+| allocations a frame | 1214 | **651** |
+| bytes a frame | 9.35 MB | 7.9 MB |
+| allocations a frame outside the software rasterizer (~490) | ~724 | **~160** |
+
+**Exact at every step**: the software street at frame 300 is byte-identical
+(`c9095c50...`) with the crowd lit on the CPU, the shadows drawn, 1101
+particles alive and 33 meshes moving - each change touches that frame - and
+the checks that pin each path stay green (`engine: programs`, `scene steps`,
+`intro beat`, `editing hold`, `character shadow`, `threaded bodies`,
+`gles pose`, `engine vertex light`, `per-pixel lighting`, `particles`,
+`impasse fx`, `scene sprites`, `patch index`, `dirty corners`,
+`tunnel doors`, `scene sounds`). No new check: the frame that proves it is
+the one `engine: threaded bodies` and `patch index` already render.
+
+**Left**: `composePose` (~3.5%) and `applyPose` (~2.4%) returning vectors
+per body, `allMotions` / `allScales` copying names every frame (made views
+into the runners' storage they would be a lifetime question for ~30
+allocations), `clipTracks`, the mirror pass's `std::vector<Draw>` copies.
+
+**A QUESTION FOUND ON THE WAY, not changed**: `shadowBonesFor(-1)` returns
+NOTHING - the chest's `minLevel` is 0 and the test is `detail >= minLevel` -
+while the function's own comment reads `Actor_DrawShadow`'s switch as "-1 and
+0 fall to the chest", and an npc takes the level minus one. At detail 0 that
+would mean npcs cast no shadow where the switch says they cast the chest's.
+It is the engine's switch that decides it, and it has not been re-read here.
 
 ### 25. The "dirty upload bug" - closed, and it was the merge's (2026-09-29)
 

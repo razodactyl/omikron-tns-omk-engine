@@ -75,7 +75,7 @@ not a CPU figure). Against the original's 32 MB, both are the port's.
 | 17 | C1: the GLES SUBMIT - state that has not changed is not set again (blend, depth mask, texture, uniforms, attributes), and a buffer's dirty runs a small gap apart go in one write | **the state cache DONE** 2026-09-29 - exact (probe and street, same binary); 1809 -> 92 state calls over 248 draws a frame; `engine: gles state cache`. **The run merge REFUTED and not committed** - it assumed the dirty list sorted, and it is not; see "25." below |
 | 25 | ~~the GLES dirty upload draws a different street from a full upload~~ | **CLOSED 2026-09-29 - NOT A BUG, and the finding was mine**: the different street came from step 17's own uncommitted run merge. The dirty list is complete and the partial upload exact (`OMK_DIRTY_AUDIT`); see "25." below |
 | 26 | RAM/GPU: `GlesRenderer::vbo_` / `poseVbo_` are keyed by `Geometry*` and never release a buffer - a geometry that is gone keeps its GPU buffer for the process's life | open |
-| 27 | **the DEPTH TIE BAKED AT LOAD** - the original's answer to a coincident pair never changes at run time, so compute it once per set load and drop the loser, instead of resolving ties every frame; see "27." below | **next** - a corpus census first, then the bake |
+| 27 | **the DEPTH TIE BAKED AT LOAD** - the original's answer to a coincident pair never changes at run time, so compute it once per set load and drop the loser, instead of resolving ties every frame; see "27." below | **the census DONE** 2026-09-29 (`engine: tie census`) - and it REFUTES the pure bake: 1540 of the sets' 5361 coincident groups span two meshes, door leaves among them, which move apart. The exact design is a HYBRID (within-mesh groups baked, cross-mesh groups resolved at run time); not built - see "27." |
 | 18 | C3: the engine's per-frame HEAP churn, ~600 allocations and ~2.4 MB a frame - the sites listed in step 15 | **DONE** 2026-09-29 - 1214 -> 651 allocations a frame in the software street (-46%), and outside the software rasterizer ~724 -> ~160 (-78%); every step byte-identical; see "18." below |
 | 19 | C4: per-body lookups that never change - foot bones, `charModelFor`/`lodRestFor`, `skeletonRootOf`, shadow bone meshes, `composePose`'s parent table - cached per model or body | open |
 | 20 | C7: the Vita's flags - `-mcpu=cortex-a9`, LTO - against `omk_bench` | open |
@@ -1660,6 +1660,49 @@ across two meshes that move independently is the one case a load-time answer
 could get wrong. Then the bake, proven by same-binary GLES street frames baked
 against the per-frame tie, byte for byte, over frames with moving cargo, and a
 check that goes red when a loser is left in.
+
+**The census, done 2026-09-29** (`engine/tools/tie_census.cpp`, `verify.py:
+engine: tie census`; faces keyed exactly as the tie keys them):
+
+| | coincident groups | within ONE mesh | ACROSS meshes |
+|---|---|---|---|
+| sets (`DECORS`, 220 models) | 5361 | 3821 | **1540** |
+| characters (`PERSOS`, 191) | 476 | 302 | 174 |
+| objects (`OBJETS`, 211) | 99 | 99 | 0 |
+| Anekbah | 169 | 165 | 4 - `Ported30`/`Porteg30`, `Ported26`/`Porteg26`, `Ported07`/`Porteg07`, `Porte25d`/`Porte25g`: door leaves |
+| AImpasse | 0 | 0 | 0 |
+| Aapkayl | 84 | 16 | 68, every group touching a blended draw (`eclair`, `cent`, `lum fx`), and a blended face claims nothing |
+
+**So the plan above is wrong in its premise, and the census is what said so.**
+"Both faces sit in one mesh" held for Anekbah's 18 shop-sign pairs and does
+not hold for the corpus: across-mesh groups are common, and the leading
+examples are DOOR LEAVES, which move - open, the faces separate and the loser
+must draw again; closed, they coincide again. A load-time answer would leave
+that face missing while the door is open.
+
+**The exact design is a hybrid**, argued here and not built:
+
+* a group WITHIN one mesh is motion-invariant: a moving mesh moves every corner
+  through one transform (`placePoints`), so its coincident faces get
+  bit-identical positions from bit-identical inputs and stay coincident; they
+  share the mesh's visibility, so both draw or neither does; and their order
+  is the bucket order, fixed per load. Resolving these ONCE per set load gives
+  the per-frame tie's answer exactly;
+* a group ACROSS meshes keeps a run-time resolution, but only over its own
+  units - four groups in Anekbah instead of the set's 30089 units;
+* a coincidence CREATED by motion between faces not coincident at rest needs
+  bit-identical positions from different transforms, which the float math does
+  not produce in practice - but "in practice" is a claim, so the build would be
+  proven the way every step here is: the hybrid's losers against the per-frame
+  tie's, frame by frame, over runs with moving cargo and opening doors, 0
+  differences, beside `engine: tie equivalence`.
+* characters need nothing: the posed tie already keys by position AND mesh
+  (`Geometry::tieClass`), resolves on the rest geometry once, and cross-mesh
+  groups never tie for a body.
+
+The prize is not measured. On the M3 the tie's walk and replay are ~1% of the
+main thread (a `sample` of the GLES street, 2026-09-29); the console's figure
+since the patch cut (~150 -> 0 patches a frame) has not been logged.
 
 ### 25. The "dirty upload bug" - closed, and it was the merge's (2026-09-29)
 

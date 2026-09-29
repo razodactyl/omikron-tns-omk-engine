@@ -15160,7 +15160,9 @@ def c_engine_tie_census():
     rules out a pure load-time answer: a group across two meshes that move
     apart can stop being coincident, and its loser must draw again.
 
-    SHOWN TO FAIL, 2026-09-29: see the step's log for the mutation and counts.
+    SHOWN TO FAIL, 2026-09-29: the quad pairing switched off (every unit a
+    triangle) turns it red - sets 6787 / 4624 / 2163, characters 520 / 335 /
+    185, objects 113, Anekbah 197 / 191 / 6.
     """
     import subprocess
     eng = os.path.join(ROOT, "engine")

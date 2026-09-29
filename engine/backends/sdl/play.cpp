@@ -456,6 +456,19 @@ void drawSubtitle(omk::Surface& fb, const omk::TextLayout& lay,
     }
 }
 
+// THE DEVICE RATE, and it is the ORIGINAL'S: `Sound_Init` (`sub_46C3A0`) sets
+// the DirectSound primary buffer to 22050 Hz / 16-bit / stereo, and what the
+// game ships is 22050 too - 61 of its 63 WAVs (the other two 22080), the voice
+// lines' ADPCM, the music tracks. The device ran at 44100 for the world only
+// because the films are 44100 MP2 and opened it first; so every world sound
+// was stretched 2x on the way in, music per output frame and each voice line
+// whole on the main thread (a console's 91-132 ms at a line's start,
+// `optimization.md` step 28, rows g/i/m). The films keep their 44100 - the
+// original played them through DirectShow, whose output never met that
+// primary (`docs/RECONSTRUCTION.md` 2026-09-01) - and the device is REOPENED
+// at 22050 for the world after them (`Frontend::reopenAudio`).
+constexpr int kDeviceRate = 22050;
+
 // Raw int16 PCM to the device's interleaved float, the same nearest-neighbour
 // step `wavToDevice` uses and for the same reason (B5: a resampler's sound is
 // the driver's and has no reachable tier). This one exists because a dialogue
@@ -470,6 +483,19 @@ std::vector<float> resampleToDevice(const std::vector<std::int16_t>& pcm,
     // this writes the same floats without its double multiply and push_back
     // per sample - a 27 s line is 2.4 million of them, which a console's A9
     // spends a visible part of a line's start on (2026-09-23)
+    // ...and THE SAME RATE, the device's since it runs at the primary's
+    // 22050: a conversion to float and nothing else
+    if (deviceRate == rate && (channels == 1 || channels == 2)) {
+        std::vector<float> o(frames * 2);
+        float* w = o.data();
+        const std::int16_t* p = pcm.data();
+        for (std::size_t f = 0; f < frames; ++f, p += channels) {
+            w[0] = p[0] / 32768.0f;
+            w[1] = channels > 1 ? p[1] / 32768.0f : w[0];
+            w += 2;
+        }
+        return o;
+    }
     if (deviceRate == 2 * rate && (channels == 1 || channels == 2)) {
         std::vector<float> o(frames * 4);
         float* w = o.data();
@@ -852,6 +878,30 @@ public:
         if (adev_) SDL_PauseAudioDevice(adev_, 0);
         return adev_ != 0;
 #endif
+    }
+
+    bool reopenAudio(int rate, int channels) override {
+#if defined(OMK_SDL3)
+        const bool open = astream_ != nullptr;
+#else
+        const bool open = adev_ != 0;
+#endif
+        if (open && arate_ == rate && achan_ == channels) return true;
+        if (open) {
+            // CLOSED before anything is dropped: closing waits for the
+            // callback, so nothing reads the buffers below while they clear
+#if defined(OMK_SDL3)
+            SDL_DestroyAudioStream(astream_);
+            astream_ = nullptr;
+#else
+            SDL_CloseAudioDevice(adev_);
+            adev_ = 0;
+#endif
+            AudioLock lk(amx_);
+            stream_.clear(); sHead_ = 0;
+            shots_.clear();
+        }
+        return openAudio(rate, channels);
     }
 
     void setMusicGain(float g) override {
@@ -2928,7 +2978,7 @@ int main(int argc, char** argv) {
     // an area change, a music switch and a cutscene.
     const auto sfxLog = [&](const char* what, std::size_t samples, int a, int b,
                             float gain = 1.0f, const std::vector<float>* pcm = nullptr) {
-        const double secs = samples / 44100.0 / 2.0;
+        const double secs = samples / static_cast<double>(kDeviceRate) / 2.0;
         // the PEAK of what is fed, because a reader heard the effects "very
         // low" against the music: the number says whether the source or the
         // mix is quiet
@@ -3330,7 +3380,7 @@ int main(int argc, char** argv) {
         if (nm.empty()) return std::vector<float>{};
         const auto path = fs.resolve("I2D/sounds/" + nm + ".wav");
         if (!path) return std::vector<float>{};
-        return wavToDevice(omk::DataFs::readPath(*path), 44100);
+        return wavToDevice(omk::DataFs::readPath(*path), kDeviceRate);
     };
 
     SdlFrontend front;
@@ -3547,7 +3597,7 @@ int main(int argc, char** argv) {
     // The streaming and the LOOP live in `src/audio/music.h`, not here. A
     // frontend is a device; it must not be deciding when a track restarts.
     const auto adpcmTables = omk::AdpcmTables::loadJson(tb + "/adpcm.json");
-    omk::MusicPlayer music(44100);
+    omk::MusicPlayer music(kDeviceRate);
     int playingTrack = -1;
     // The cutscene VOICES - `media.play` (op 92). `sub_41B200` plays one
     // through the morph streamer after a `Morph_Stop()`, so ONE at a time and
@@ -4689,7 +4739,7 @@ int main(int argc, char** argv) {
     const auto sfxPcm = [&sfxCache](std::span<const std::byte> wav) -> const std::vector<float>& {
         const auto key = std::make_pair(wav.data(), wav.size());
         auto it = sfxCache.find(key);
-        if (it == sfxCache.end()) it = sfxCache.emplace(key, wavToDevice(wav, 44100)).first;
+        if (it == sfxCache.end()) it = sfxCache.emplace(key, wavToDevice(wav, kDeviceRate)).first;
         return it->second;
     };
     const auto shotSound = [&](long frame, int effectId, const float at[3],
@@ -5850,7 +5900,8 @@ int main(int argc, char** argv) {
             std::printf("  %s %dx%d %.2f s\n", name, mov.info().width,
                         mov.info().height, mov.info().duration);
             // 44100 stereo, the stream's own rate - NOT the engine's 22050
-            // primary, which these never went through.
+            // primary, which these never went through (the world reopens the
+            // device at that rate after them).
             const bool audioOk =
                 front.openAudio(mov.info().sampleRate ? mov.info().sampleRate : 44100, 2);
             const double fps = mov.info().framerate > 0 ? mov.info().framerate : 30.0;
@@ -5970,12 +6021,11 @@ int main(int argc, char** argv) {
     // `--nofmv` (or a street start, which skips the movies) never opened it
     // and every world sound was dropped without a word: no music, no
     // effects, no voices. A reader on 2026-09-04: "there is absolutely no
-    // sound at all". The world converts everything to 44100 (`wavToDevice`),
-    // so that is the rate it opens at; a device the movies already opened is
-    // kept as it is (openAudio returns early).
+    // sound at all". The world plays at the primary's 22050 (`kDeviceRate`),
+    // and a device the films opened at their 44100 is REOPENED at it.
     if (!frames) {
-        if (front.openAudio(44100, 2))
-            std::printf("audio: device open at 44100 Hz stereo for the world\n");
+        if (front.reopenAudio(kDeviceRate, 2))
+            std::printf("audio: device open at %d Hz stereo for the world\n", kDeviceRate);
         else
             std::printf("audio: NO DEVICE (%s) - the world will be silent\n", SDL_GetError());
     }
@@ -10579,16 +10629,16 @@ int main(int argc, char** argv) {
         const double musicQueued = !musicPaused && music.playing() ? front.queuedSeconds() : 9.0;
         if (musicQueued < 1.0) {
             const double want = musicQueued < 0.3 ? 1.0 - musicQueued : std::min(0.25, 1.0 - musicQueued);
-            const std::size_t frames44 = static_cast<std::size_t>(want * 44100.0) + 1;
+            const std::size_t frames44 = static_cast<std::size_t>(want * kDeviceRate) + 1;
             std::vector<float> chunk;
             spanned("music", [&] { music.pull(chunk, frames44); });
             {
                 static double musicPeakTold = 0.0; static float musicPeak = 0.0f; static std::size_t musicSamples = 0;
                 for (const float v : chunk) musicPeak = std::max(musicPeak, std::fabs(v));
                 musicSamples += chunk.size();
-                if (musicSamples >= 44100u * 2u * 10u) {   // every ten seconds
+                if (musicSamples >= static_cast<std::size_t>(kDeviceRate) * 2u * 10u) {   // every ten seconds
                     std::printf("audio: music peak %.3f over the last %.0f s\n",
-                                static_cast<double>(musicPeak), musicSamples / 88200.0);
+                                static_cast<double>(musicPeak), musicSamples / (2.0 * kDeviceRate));
                     musicPeak = 0.0f; musicSamples = 0; (void)musicPeakTold;
                 }
             }
@@ -10610,7 +10660,7 @@ int main(int argc, char** argv) {
                         static_cast<double>(pcm.size()) / omk::kAdpcmRate);
             front.stopSound(voiceOverShot);
             voiceOverShot = pcm.empty() ? -1
-                : front.playSound(resampleToDevice(pcm, 1, omk::kAdpcmRate, 44100));
+                : front.playSound(resampleToDevice(pcm, 1, omk::kAdpcmRate, kDeviceRate));
             // ...and the TEXT. Step 13 of the handler is `Subtitle_Show` of
             // the buffer step 6 built: the record's +280 description, with a
             // `{C}` (centre) prefix when the player's ACTOR_STATE is 3 or
@@ -10771,7 +10821,7 @@ int main(int argc, char** argv) {
                 front.stopSound(voiceShot);
                 const auto rs0 = std::chrono::steady_clock::now();
                 std::vector<float> voiceDev = dlg.pcm().empty() ? std::vector<float>{}
-                    : resampleToDevice(dlg.pcm(), dlg.channels(), 22050, 44100);
+                    : resampleToDevice(dlg.pcm(), dlg.channels(), 22050, kDeviceRate);
                 const double resampleMs = lineMs(rs0);
                 const auto ps0 = std::chrono::steady_clock::now();
                 voiceShot = voiceDev.empty() ? -1 : front.playSound(std::move(voiceDev));
@@ -18854,7 +18904,7 @@ int main(int argc, char** argv) {
                     const std::string& nm = w.soundNameById(id);
                     if (!nm.empty())
                         if (const auto path = fs.resolve("I2D/sounds/" + nm + ".wav"))
-                            v = wavToDevice(omk::DataFs::readPath(*path), 44100);
+                            v = wavToDevice(omk::DataFs::readPath(*path), kDeviceRate);
                     it = cache.emplace(id, std::move(v)).first;
                 }
                 return it->second;
@@ -19652,7 +19702,7 @@ int main(int argc, char** argv) {
                     const std::string& nm = w.soundNameById(id);
                     if (!nm.empty())
                         if (const auto path = fs.resolve("I2D/sounds/" + nm + ".wav"))
-                            pcm = wavToDevice(omk::DataFs::readPath(*path), 44100);
+                            pcm = wavToDevice(omk::DataFs::readPath(*path), kDeviceRate);
                     it = shopSounds.emplace(id, std::move(pcm)).first;
                 }
                 if (!it->second.empty()) blip(it->second);

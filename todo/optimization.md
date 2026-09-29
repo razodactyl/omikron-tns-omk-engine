@@ -1853,6 +1853,22 @@ LOD on, the worst foot-to-body offset is unchanged (22.8 / 5.3 units, against
 skeleton in the same place and pose. The CPU gain is below the M1's 0.1 ms
 resolution; the console's `ped compose` (1.2-2.5 ms) is what it should cut.
 
+**g, i, m - the device at the primary's 22050 - DONE 2026-09-30.** `Sound_Init`
+(`sub_46C3A0`) sets the DirectSound primary to 22050/16/stereo and what the game
+ships is 22050 (61 of 63 WAVs, the other two 22080; the voice ADPCM; the
+music), but the port's device ran at 44100 because the FILMS opened it first -
+so every world sound was stretched 2x: the music per output frame, each voice
+line whole on the main thread. The films keep their 44100 (the original played
+them through DirectShow, whose output never met the primary), and the world
+REOPENS the device at 22050 after them (`Frontend::reopenAudio`: the device
+closed, then every queued sample and voice dropped, then opened). The voices
+and effects convert at the same rate - a float conversion and nothing else
+(`resampleToDevice`'s new same-rate path, equal to the generic loop at step 1),
+and the music pulls half the frames. Headless with SDL's dummy driver: the
+films play in real time at 44100, the device reopens at 22050 when they end,
+and track 109's ten-second peak is 0.790 - the console log's own figure. The
+Vita's SDL (2.32.8) opens its BGM port for a rate under 48000, which 22050 is.
+
 **Correction, 2026-09-30 - the upload counter overstated.** GLES booked a
 PARTIAL upload at the whole geometry's size, so the set's 69-run motion patch
 read as 5 MB every frame; row (a)'s "53 uploads, 7.1 MB, 34 ms" and its split

@@ -95,6 +95,11 @@ public:
     // them through DirectShow, which had its own output, so they never met
     // that mixer and must not be fed through the ported one.
     virtual bool openAudio(int /*rate*/, int /*channels*/) { return false; }
+    // ...and the WORLD's device, at the primary's 22050: the films open it at
+    // their 44100, and the world then REOPENS it at its own rate - closed
+    // first, with every queued sample and voice dropped, so nothing of a film
+    // plays on under the world (the fault a reopen per film once had).
+    virtual bool reopenAudio(int rate, int channels) { return openAudio(rate, channels); }
     // The STREAM: the movies' soundtrack, and the game's music. Pushed in as
     // it is decoded and consumed at the device's own rate.
     virtual void queueAudio(std::span<const float>) {}

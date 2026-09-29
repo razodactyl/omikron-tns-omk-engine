@@ -36778,6 +36778,9 @@ def c_licence_headers():
     motion's point placement with its generic and NEON loops.
     **478 -> 479**: `engine/tools/adpcm_equiv.cpp` (2026-09-29), the ADPCM
     table's oracle (`todo/optimization.md` step 16).
+    **479 -> 480**: `engine/tools/tie_census.cpp` (2026-09-29), the depth tie's
+    coincidence census (step 27). `book/`'s two scripts carry the line too but
+    sit outside these roots, so they do not count here.
     """
     import glob as _g
     TAG = "SPDX-License-Identifier: GPL-3.0-or-later"
@@ -36807,7 +36810,7 @@ def c_licence_headers():
                    if TAG in open(p, encoding="utf-8",
                                   errors="replace").read(600)]
     return (authored, sorted(missing), len(vendored), mislabelled), \
-           (479, [], 1, []), \
+           (480, [], 1, []), \
            "authored source files under tools/, engine/src, engine/tools, " \
            "engine/backends and scripts/; those MISSING the SPDX tag; " \
            "vendored files in engine/third_party; and vendored files wrongly " \

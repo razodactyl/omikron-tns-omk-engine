@@ -93,8 +93,15 @@ game's data.
 
 ## When these were last refreshed
 
-**2026-09-18**, against commit `4b71e07`, by re-running every command above
-with the existing build (`SDL_VIDEODRIVER=dummy` so no window opens). All three
-still run. The text render still paints exactly **6 132** pixels, which is the
-figure chapters 8 and 10 quote, and its PNG is byte-identical to the previous
-one; the other two changed for the reasons given under each.
+**2026-09-29**, against commit `200e4b1`, by re-running every command above
+with the current build (`SDL_VIDEODRIVER=dummy` so no window opens; the dumps
+written to a scratch folder, not `/tmp`). All three still run: the dialogue
+render presents its 1 frame, the street its 120, and the text render still
+paints exactly **6 132** pixels. **All three PNGs came out byte-identical to
+the previous ones**, so none was replaced - which also says the day's speed
+work (`todo/optimization.md` steps 16-18) left the software street at frame 120
+unchanged.
+
+The previous refresh, 2026-09-18, was recorded against commit `4b71e07`, which
+no longer resolves: the history was rewritten on ~2026-09-19 and every later
+SHA changed.

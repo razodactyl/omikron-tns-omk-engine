@@ -172,6 +172,12 @@ state` line every 60 frames - draws, state calls made, skipped. After that,
 **step 27** - the depth tie computed once per set load instead of every
 frame - is the largest single item left, and `--no-tie` in `args.txt` for
 one run still says whether the Vita's own depth test flickers without it.
+**And the compiler flags** (step 20): `make vita-tuned` builds the same three
+VPKs with Cortex-A9 scheduling and LTO into `engine/build/vita-tuned/`. Run
+`omk_bench` from each build on the console and compare the `inline ... total`
+and `place`/`texkey` lines - the hashes are already proven equal (Vita3K); the
+times are what only the console can give. Only if the tuned one wins does
+`OMK_VITA_TUNE` become the default.
 
 0. Nothing below can be sized without **one console log from the city**. The
    frame now prints its eight largest SECTIONS (over 150 ms) and, every 60

@@ -81,7 +81,9 @@ case "${1:-}" in
     *) echo "usage: $0 setup|bench|smoke|game [seconds]" >&2; exit 2 ;;
 esac
 setup >/dev/null   # idempotent: points the global storage path at fs/ every run
-file="$here/engine/build/vita/$vpk.vpk"
+# `OMK_VPK_DIR` picks another build folder - `engine/build/vita-tuned` for the
+# `make vita-tuned` build (todo/optimization.md step 20)
+file="${OMK_VPK_DIR:-$here/engine/build/vita}/$vpk.vpk"
 [ -f "$file" ] || { echo "no $file - run 'make vita' in engine/" >&2; exit 1; }
 rm -rf "$fs/ux0/app/$id"
 mkdir -p "$fs/ux0/app/$id"

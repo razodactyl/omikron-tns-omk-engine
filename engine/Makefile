@@ -224,6 +224,24 @@ else
 	@echo "built build/vita/omk_vita.vpk (the game), omk_bench.vpk and omk_smoke.vpk"
 endif
 
+# THE SAME, WITH `OMK_VITA_TUNE` (todo/optimization.md step 20): Cortex-A9
+# scheduling and LTO, into build/vita-tuned/ so the two can be laid side by
+# side on a console. Same title ids: installing one replaces the other.
+.PHONY: vita-tuned
+vita-tuned:
+ifeq ($(wildcard $(VITASDK_DIR)/share/vita.toolchain.cmake),)
+	@echo "no VitaSDK found (\$$VITASDK or ~/vitasdk) - the Vita build is optional."
+else
+	@mkdir -p build/vita-tuned
+	VITASDK=$(VITASDK_DIR) PATH="$(VITASDK_DIR)/bin:$$PATH" \
+	    cmake -S backends/vita -B build/vita-tuned-cmake -DOMK_VITA_TUNE=ON >/dev/null
+	VITASDK=$(VITASDK_DIR) PATH="$(VITASDK_DIR)/bin:$$PATH" \
+	    cmake --build build/vita-tuned-cmake -j$(NPROC)
+	cp build/vita-tuned-cmake/omk_bench.vpk build/vita-tuned-cmake/omk_smoke.vpk \
+	    build/vita-tuned-cmake/omk_vita.vpk build/vita-tuned/
+	@echo "built build/vita-tuned/ (Cortex-A9 scheduling + LTO): omk_vita.vpk, omk_bench.vpk, omk_smoke.vpk"
+endif
+
 # The Vita bench on THIS machine - the same source, so a device run divides
 # by it (`backends/vita/bench_main.cpp`). Needs nothing installed.
 build/vita_bench: backends/vita/bench_main.cpp $(SRCOBJS)

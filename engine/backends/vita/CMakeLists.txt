@@ -60,6 +60,18 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -Wall -Wextra -mfpu=neon -mfloat-abi
 # `-DOMK_VITA_ASSERTS=ON`: libstdc++'s bounds checks (vector / string / span
 # indexing), so an out-of-range write ABORTS at its line with a message instead
 # of corrupting newlib's heap silently - the Vita has no sanitizer.
+# `-DOMK_VITA_TUNE=ON` (todo/optimization.md step 20): schedule for the
+# console's own core (`-mcpu=cortex-a9`, which the defaults above do not name -
+# they target generic ARMv7) and link-time optimisation. Neither changes a
+# float result: `-ffp-contract=off` stays, and neither flag licenses the
+# compiler to reassociate. OFF by default until a console run says it is
+# faster; `make vita-tuned` builds it beside the default into its own folder.
+option(OMK_VITA_TUNE "Cortex-A9 scheduling and LTO" OFF)
+if(OMK_VITA_TUNE)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=cortex-a9 -mtune=cortex-a9 -flto")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=cortex-a9 -mtune=cortex-a9 -flto")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto -mcpu=cortex-a9")
+endif()
 option(OMK_VITA_ASSERTS "libstdc++ bounds checks, for hunting a heap overwrite" OFF)
 if(OMK_VITA_ASSERTS)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_ASSERTIONS")
@@ -82,6 +94,13 @@ foreach(fn ${OMK_PRINTF_WRAP})
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--wrap=${fn}")
 endforeach()
 set(OMK_VITA_COMMON ${CMAKE_CURRENT_SOURCE_DIR}/printf_c99.cpp)
+# With LTO the `__wrap_*` definitions would stay LTO bitcode, which `--wrap`
+# resolves against too late ("undefined reference to `__wrap_printf'", the
+# first tuned link, 2026-09-29): that one file is compiled to a real object.
+if(OMK_VITA_TUNE)
+  set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/printf_c99.cpp
+                              PROPERTIES COMPILE_OPTIONS "-fno-lto")
+endif()
 
 # ---- the engine: every ported source, exactly the Makefile's glob
 file(GLOB OMK_SRC ${ENGINE}/src/*/*.cpp)

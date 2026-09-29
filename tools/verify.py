@@ -36730,6 +36730,8 @@ def c_licence_headers():
     the authored lines do not.
     **476 -> 478**: `src/o3de/pointplace.{h,cpp}` (2026-09-25), the scripted
     motion's point placement with its generic and NEON loops.
+    **478 -> 479**: `engine/tools/adpcm_equiv.cpp` (2026-09-29), the ADPCM
+    table's oracle (`todo/optimization.md` step 16).
     """
     import glob as _g
     TAG = "SPDX-License-Identifier: GPL-3.0-or-later"
@@ -36759,7 +36761,7 @@ def c_licence_headers():
                    if TAG in open(p, encoding="utf-8",
                                   errors="replace").read(600)]
     return (authored, sorted(missing), len(vendored), mislabelled), \
-           (478, [], 1, []), \
+           (479, [], 1, []), \
            "authored source files under tools/, engine/src, engine/tools, " \
            "engine/backends and scripts/; those MISSING the SPDX tag; " \
            "vendored files in engine/third_party; and vendored files wrongly " \

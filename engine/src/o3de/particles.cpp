@@ -294,7 +294,19 @@ void particleGeometry(Geometry& g, const ParticleField& f, const float eye[3],
     // ascending, so every additive batch precedes every multiply one whatever
     // their sprites. The batch's `material` is the SPRITE INDEX; the caller
     // maps it to a slot, which is the key's low six bits.
-    std::map<std::pair<int, int>, std::vector<Corner>> groups;
+    //
+    // WITHOUT A MAP OF VECTORS (todo/optimization.md step 18): a node and a
+    // growing vector per group every frame, then every corner copied again.
+    // Each particle's six corners and its key go into scratch kept across
+    // frames, and the batches are emitted key by ascending key, each taking
+    // its particles in the order they came - the order the map gave. Main
+    // thread only, as every caller is; the scratch is not for the pool.
+    static std::vector<Corner> quad;                 // 6 a particle, in order
+    static std::vector<std::pair<int, int>> keyOf;   // a particle's key
+    static std::vector<std::pair<int, int>> keys;    // the distinct keys, ascending
+    quad.clear();
+    keyOf.clear();
+    keys.clear();
     for (const auto& p : f.particles()) {
         const SpriteFrames* sf = sprites(p.sprite);
         // `(frames - 1) * age / life` - the sprite's quads played across the
@@ -344,24 +356,30 @@ void particleGeometry(Geometry& g, const ParticleField& f, const float eye[3],
             c[k].b = p.col[2];
             c[k].phase = -1.0f;
         }
-        auto& v = groups[{spriteModeBits(p.mode) * 16 + p.mode, p.sprite}];
-        v.insert(v.end(), {c[0], c[1], c[2], c[0], c[2], c[3]});
+        const std::pair<int, int> key{spriteModeBits(p.mode) * 16 + p.mode, p.sprite};
+        keyOf.push_back(key);
+        const auto at = std::lower_bound(keys.begin(), keys.end(), key);
+        if (at == keys.end() || *at != key) keys.insert(at, key);
+        quad.insert(quad.end(), {c[0], c[1], c[2], c[0], c[2], c[3]});
     }
 
-    for (auto& [key, corners] : groups) {
+    for (const auto& key : keys) {
         const auto mode = static_cast<std::uint8_t>(key.first & 0xF);
         Batch b;
         b.material = key.second;            // the SPRITE index
         b.blend    = blendOfMode(mode);
         b.cutout   = cutoutOfMode(mode);
         b.start    = g.corners.size();
-        b.count    = corners.size();
+        for (std::size_t i = 0; i < keyOf.size(); ++i)
+            if (keyOf[i] == key)
+                g.corners.insert(g.corners.end(), quad.begin() + static_cast<std::ptrdiff_t>(6 * i),
+                                 quad.begin() + static_cast<std::ptrdiff_t>(6 * i + 6));
+        b.count    = g.corners.size() - b.start;
         g.batches.push_back(b);
-        g.corners.insert(g.corners.end(), corners.begin(), corners.end());
-        g.cornerMirror.insert(g.cornerMirror.end(), corners.size(), 0);
-        g.cornerMesh.insert(g.cornerMesh.end(), corners.size(), -1);
-        g.cornerVertex.insert(g.cornerVertex.end(), corners.size(), -1);
-        g.cornerDeclared.insert(g.cornerDeclared.end(), corners.size(), -1);
+        g.cornerMirror.insert(g.cornerMirror.end(), b.count, 0);
+        g.cornerMesh.insert(g.cornerMesh.end(), b.count, -1);
+        g.cornerVertex.insert(g.cornerVertex.end(), b.count, -1);
+        g.cornerDeclared.insert(g.cornerDeclared.end(), b.count, -1);
     }
     ++g.revision;
 }

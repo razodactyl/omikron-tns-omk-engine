@@ -6318,7 +6318,17 @@ int main(int argc, char** argv) {
         // reports 632/-43/34, so the listener was measured against a point
         // 3400 units outside the building and the door slid in silence at
         // gain 0.03. Computed once here rather than twice.
-        std::map<std::string, std::array<float, 3>> motionAt;
+        // `motionAt` - where each moved mesh was PLACED this frame, by name,
+        // the last write winning, as the map it was (todo/optimization.md step
+        // 18: a map node a motion every frame). Kept across frames for its
+        // capacity; mesh names fit a short string, so a reused slot allocates
+        // nothing.
+        static std::vector<std::pair<std::string, std::array<float, 3>>> motionAt;
+        motionAt.clear();
+        const auto motionAtFind = [&](const std::string& name) -> const std::array<float, 3>* {
+            for (const auto& kv : motionAt) if (kv.first == name) return &kv.second;
+            return nullptr;
+        };
         std::vector<omk::Program::NodeMotion> allMotions;
         std::map<std::string, omk::SceneRunner::NodeScale> allScales;
         const double motionGather0 = phaseNow();
@@ -6399,18 +6409,28 @@ int main(int argc, char** argv) {
                     const auto it = w.meshByLowerName.find(lowerName(name));
                     return it == w.meshByLowerName.end() ? -1 : it->second;
                 };
-                std::map<int, Patch> patches;
+                // THE PATCHES, a mesh each - a map node each every frame, until
+                // step 18. A scratch vector found by mesh index and SORTED by
+                // it before use, so they are walked in the map's own order
+                // (which is the order the dirty list is built in).
+                static std::vector<std::pair<int, Patch>> patches;
+                patches.clear();
+                const auto patchOf = [&](int mi) -> Patch& {
+                    for (auto& kv : patches) if (kv.first == mi) return kv.second;
+                    patches.emplace_back(mi, Patch{});
+                    return patches.back().second;
+                };
                 for (const auto& ns : allScales) {
                     const int mi = meshIndex(ns.first);
                     if (mi < 0) continue;
-                    Patch& p = patches[mi];
+                    Patch& p = patchOf(mi);
                     for (int c = 0; c < 3; ++c) p.s[c] = ns.second.s[c];
                 }
                 for (const auto& mo : allMotions) {
                     if (!mo.placed) continue;
                     const int mi = meshIndex(mo.name);
                     if (mi < 0) continue;
-                    Patch& p = patches[mi];
+                    Patch& p = patchOf(mi);
                     p.hasMotion = true;
                     // THE PATH IS A DISPLACEMENT, and the anchor is the mesh
                     // itself. `Script_MoveObjectOnPath` places the node at
@@ -6421,7 +6441,12 @@ int main(int argc, char** argv) {
                     // authored on its mesh - `AHALL40`'s are, `AAPKAYL`'s are
                     // not, and that is the whole of the apartment door bug.
                     mo.placeOn(w.meshes[static_cast<std::size_t>(mi)].pos, p.pos);
-                    motionAt[mo.name] = {p.pos[0], p.pos[1], p.pos[2]};
+                    {
+                        const std::array<float, 3> at{p.pos[0], p.pos[1], p.pos[2]};
+                        bool found = false;
+                        for (auto& kv : motionAt) if (kv.first == mo.name) { kv.second = at; found = true; break; }
+                        if (!found) motionAt.emplace_back(mo.name, at);
+                    }
                     if (omk::envSet("OMK_TRACE_MOTION")) {
                         const float* mp = w.meshes[static_cast<std::size_t>(mi)].pos;
                         std::printf("  [motion] %-12s sample %.0f %.0f %.0f  from %.0f %.0f %.0f"
@@ -6437,6 +6462,8 @@ int main(int argc, char** argv) {
                     p.q = omk::Quatf{mo.quat[0], mo.quat[1], mo.quat[2], mo.quat[3]};
                     p.rotated = mo.rotated;
                 }
+                std::sort(patches.begin(), patches.end(),
+                          [](const auto& a, const auto& b) { return a.first < b.first; });
                 bool moved = false;
                 std::vector<std::uint32_t> dirty;   // the corners this frame's patch rewrote
                 const double motionPatch0 = phaseNow();
@@ -6928,9 +6955,8 @@ int main(int argc, char** argv) {
                         float best = 1e30f;
                         for (const auto& m : mo) {
                             // the PLACED position, not the raw sample
-                            const auto pl = motionAt.find(m.name);
-                            const float* w = pl == motionAt.end() ? m.pos
-                                                                 : pl->second.data();
+                            const auto* pl = motionAtFind(m.name);
+                            const float* w = pl ? pl->data() : m.pos;
                             const float dx = w[0] - L[0], dy = w[1] - L[1],
                                         dz = w[2] - L[2];
                             best = std::min(best, dx * dx + dy * dy + dz * dz);

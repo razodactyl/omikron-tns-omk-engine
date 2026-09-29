@@ -16,6 +16,37 @@
 
 namespace omk {
 
+// WHETHER A GPU BACKEND HOLDS STATE FOR A GEOMETRY, and the notice it gets
+// when that geometry is destroyed (todo/optimization.md step 26). The backends
+// key their vertex buffers and depth-tie tables by `const Geometry*` and never
+// released them: a staged body, a walker or a model that went away left its
+// buffer resident for the process's life, and a new geometry at the same
+// address could meet the old one's state. A destroyed address can never be
+// drawn again, so dropping what is keyed on it is exact.
+//
+// The mark is set by a backend, on the main thread, when it first keeps
+// something for the geometry; only a marked geometry notifies. Its copy and
+// move do NOTHING - residency belongs to the object at an address, not to its
+// contents - so `Geometry` keeps its implicit copy and move, and a copy of an
+// uploaded geometry is not taken for resident. The only geometries destroyed
+// on the pose threads are never uploaded, so a notice is always main-thread.
+class GpuResidency {
+public:
+    GpuResidency() = default;
+    GpuResidency(const GpuResidency&) noexcept {}
+    GpuResidency& operator=(const GpuResidency&) noexcept { return *this; }
+    ~GpuResidency();
+    void mark() const { on_ = true; }
+    bool marked() const { return on_; }
+private:
+    mutable bool on_ = false;
+};
+struct Geometry;
+using GeometryGone = void (*)(void* ctx, const Geometry* g);
+// at most eight listeners; main thread only
+void addGeometryListener(GeometryGone fn, void* ctx);
+void removeGeometryListener(GeometryGone fn, void* ctx);
+
 // Which meshes to draw.
 enum class DrawFilter {
     // The ENGINE's rule, and the one a replica wants. The traversal feeding
@@ -149,6 +180,9 @@ struct Geometry {
     // replay outright. Empty means what it always meant: positions alone.
     std::vector<std::int32_t> tieClass;
     std::uint64_t tieRigidFrom = 0;
+    // LAST, so no field before it moves: see `GpuResidency` above. Never
+    // copied - `applyPose` and every assignment leave it alone.
+    GpuResidency resident;
 };
 
 // THE MIRROR PLANE - mesh flag 0x100000, and the engine reflects through it.

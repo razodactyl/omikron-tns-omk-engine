@@ -505,6 +505,12 @@ std::string glesFrameReport() {
 
 class GlesRenderer : public Renderer {
 public:
+    // A geometry the renderer holds state for tells it when it is destroyed
+    // (`omk::GpuResidency`, todo/optimization.md step 26).
+    GlesRenderer() {
+        releaseOn_ = std::getenv("OMK_NO_GEOMETRY_RELEASE") == nullptr;
+        addGeometryListener(&GlesRenderer::geometryGone, this);
+    }
     ~GlesRenderer() override;
     bool init(int w, int h) override;
     void setTextures(std::span<const Texture> t) override;
@@ -660,10 +666,45 @@ private:
     } ds_;
     bool stateCache_ = true;
     void forgetState() { ds_ = DrawState{}; }
+
+    // THE BUFFERS OF GEOMETRIES THAT ARE GONE (todo/optimization.md step 26).
+    // The maps are cleared at once - a new geometry at the same address then
+    // starts afresh instead of meeting the old one's buffer and tie - and the
+    // GL buffers are deleted at the next `begin`, outside any draw.
+    // `OMK_NO_GEOMETRY_RELEASE=1` keeps the old behaviour, to compare.
+    bool releaseOn_ = true;
+    std::vector<GLuint> deadBufs_;
+    long released_ = 0;
+    static void geometryGone(void* self, const Geometry* g) {
+        auto* r = static_cast<GlesRenderer*>(self);
+        if (!r->releaseOn_) return;
+        bool had = false;
+        if (auto it = r->vbo_.find(g); it != r->vbo_.end()) {
+            r->deadBufs_.push_back(it->second.id);
+            r->vbo_.erase(it);
+            had = true;
+        }
+        if (auto it = r->poseVbo_.find(g); it != r->poseVbo_.end()) {
+            r->deadBufs_.push_back(it->second.id);
+            r->poseVbo_.erase(it);
+            had = true;
+        }
+        had |= r->tie_.erase(g) > 0;
+        had |= r->poseTie_.erase(g) > 0;
+        // a CPU-posed copy is itself uploaded: erasing it notifies again, for
+        // its own address, which the lines above then release
+        had |= r->cpuPosed_.erase(g) > 0;
+        if (had) ++r->released_;
+    }
 public:
     // for `gles_probe`: the same draws with and without the cache, in one
     // context (`engine: gles state cache`)
     void setStateCache(bool on) { stateCache_ = on; forgetState(); }
+    void geometryStats(long out[3]) const {
+        out[0] = released_;
+        out[1] = static_cast<long>(vbo_.size());
+        out[2] = static_cast<long>(poseVbo_.size());
+    }
     bool posesBodies() const override { return posed_ != 0; }
     int maxVertexLights() const override { return posed_ ? kVertexLights : 0; }
 private:
@@ -694,6 +735,9 @@ private:
 };
 
 GlesRenderer::~GlesRenderer() {
+    // first: the members destroyed below include geometries (`cpuPosed_`)
+    removeGeometryListener(&GlesRenderer::geometryGone, this);
+    if (!deadBufs_.empty()) glDeleteBuffers(static_cast<GLsizei>(deadBufs_.size()), deadBufs_.data());
     for (auto& [g, vb] : vbo_) glDeleteBuffers(1, &vb.id);
     // the pool's ids are owned by `uploaded_` (two slots may share one)
     for (auto& [key, u] : uploaded_) if (u.id) glDeleteTextures(1, &u.id);
@@ -1208,6 +1252,7 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
     vb.n = v.size();
     vb.rev = g->revision;
     vbo_[g] = vb;
+    g->resident.mark();
     tie_[g].vboReplaced();
     return true;
 }
@@ -1280,6 +1325,10 @@ void GlesRenderer::resolveTies(const Draw& d, Vbo& vb) {
 
 void GlesRenderer::begin(const View& view) {
     g_glesFrame = GlesFrameCounts{};
+    if (!deadBufs_.empty()) {
+        glDeleteBuffers(static_cast<GLsizei>(deadBufs_.size()), deadBufs_.data());
+        deadBufs_.clear();
+    }
     ++frameNo_;
     st_ = RasterStats{};
     view_ = view;
@@ -1353,6 +1402,7 @@ bool GlesRenderer::uploadPosedGeometry(const Geometry* g, PoseVbo*& out) {
     // runs once per revision and the buffer is STATIC - the whole point
     // (todo/gpu-skinning.md). Each corner carries its mesh's SLOT.
     PoseVbo& pv = poseVbo_[g];
+    g->resident.mark();
     out = &pv;
     if (pv.id && pv.rev == g->revision && pv.n == g->corners.size()) return true;
     if (g->corners.empty() || g->cornerMesh.size() != g->corners.size()) return false;
@@ -1450,6 +1500,7 @@ void GlesRenderer::submit(const Draw& d) {
         // MORE MESHES THAN THE PROGRAM HOLDS: pose it here, on the CPU, into a
         // geometry of its own, and draw that the ordinary way
         Geometry& cp = cpuPosed_[d.geo];
+        d.geo->resident.mark();
         if (cp.corners.size() != d.geo->corners.size()) cp = *d.geo;
         for (std::size_t i = 0; i < cp.corners.size(); ++i) {
             const Corner& rc = d.geo->corners[i];
@@ -1905,6 +1956,13 @@ bool glesPresentOverlay(Renderer* r, const Surface& s, const unsigned char* mask
     return static_cast<GlesRenderer*>(r)->presentOverlay(s, mask, maskRows, fade, vy, vh, winW, winH);
 }
 long glesTakeOverlayRows(Renderer* r) { return static_cast<GlesRenderer*>(r)->takeOverlayRows(); }
+// geometries released so far (todo/optimization.md step 26), and the vertex
+// and posed buffers still held
+void glesGeometryStats(Renderer* r, long out[3]) {
+    out[0] = out[1] = out[2] = 0;
+    if (auto* g = dynamic_cast<GlesRenderer*>(r)) g->geometryStats(out);
+}
+
 // the draw-state cache on or off, for a probe that compares the two
 void glesSetStateCache(Renderer* r, bool on) {
     if (auto* g = dynamic_cast<GlesRenderer*>(r)) g->setStateCache(on);

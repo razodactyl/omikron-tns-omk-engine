@@ -81,6 +81,7 @@ void glesSetWindowTarget(Renderer*, unsigned fbo);
 void glesSetDepthTie(Renderer*, bool);
 void glesSetStateCache(Renderer*, bool);
 void glesTakeStateCalls(long out[3]);
+void glesGeometryStats(Renderer*, long out[3]);
 }
 
 namespace {
@@ -589,6 +590,55 @@ int main(int argc, char** argv) {
                     "lit %ld; on differs %ld, second frame differs %ld\n",
                     nDraws, offSet, onSet, onSkip, lit, d1, d2);
         failures += d1 != 0 || d2 != 0 || lit == 0;
+    }
+
+    // 6. THE BUFFERS OF A GEOMETRY THAT IS GONE (todo/optimization.md step
+    // 26). A copy of the set, drawn and then destroyed, must release exactly
+    // one geometry and leave one buffer fewer; and a NEW geometry - shifted,
+    // with the SAME revision, very likely at the dead one's address - must
+    // draw what a fresh geometry draws, not the dead one's buffer. Without the
+    // release, a matching address and revision is exactly what skips its
+    // upload and shows the old picture.
+    {
+        omk::View v;
+        v.cam = cam; v.cam.w = W; v.cam.h = H;
+        v.dither = true;
+        const auto drawOf = [&](const omk::Geometry& gg) {
+            std::vector<omk::Draw> ds = draws;
+            for (auto& x : ds) x.geo = &gg;
+            gl->begin(v);
+            for (const auto& x : ds) gl->submit(x);
+            gl->end();
+            return gl->readback();
+        };
+        const auto shifted = [&] {
+            auto* g = new omk::Geometry(geo);
+            for (auto& c : g->corners) c.x += 40.0f;
+            return g;
+        };
+        long s0[3], s1[3], s2[3];
+        omk::glesGeometryStats(gl, s0);
+        auto* a = new omk::Geometry(geo);
+        const void* aAddr = a;
+        (void)drawOf(*a);
+        omk::glesGeometryStats(gl, s1);
+        delete a;
+        omk::glesGeometryStats(gl, s2);
+        omk::Geometry* b = shifted();              // likely where `a` was
+        const bool sameAddr = static_cast<const void*>(b) == aAddr;
+        const omk::Surface picB = drawOf(*b);
+        omk::Geometry* c = shifted();              // alive beside `b`: a new address
+        const omk::Surface picC = drawOf(*c);
+        long differ = 0;
+        for (std::size_t i = 0; i < picB.px.size() && i < picC.px.size(); ++i) differ += picB.px[i] != picC.px[i];
+        delete b;
+        delete c;
+        const long rel = s2[0] - s1[0], held = s1[1] - s2[1];
+        std::printf("geometry release: drawn and destroyed, %ld released and %ld buffer fewer "
+                    "(held %ld -> %ld -> %ld); a new geometry at the %s address differs from a "
+                    "fresh one in %ld pixels\n", rel, held, s0[1], s1[1], s2[1],
+                    sameAddr ? "SAME" : "another", differ);
+        failures += rel != 1 || held != 1 || differ != 0;
     }
 
     delete gl;

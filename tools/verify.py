@@ -14753,6 +14753,12 @@ def c_engine_pose_equivalence():
     not refreshing `phase`, and the in-place path not assigning `cornerVertex`,
     each give 229 of 241 calls differing on all three models - caught only
     because the posed geometry is edited between calls, as the viewer does.
+    
+    **224 -> 232 on 2026-09-29**: `Geometry::resident`, the `GpuResidency`
+    mark (todo/optimization.md step 26), and it is the one field `applyPose`
+    must NOT copy - residency belongs to the object at an address, not to its
+    contents - which its own copy and move enforce by doing nothing. Every
+    per-model row stayed at 0 mismatches across the change.
     """
     import subprocess
     eng = os.path.join(ROOT, "engine")
@@ -14776,7 +14782,7 @@ def c_engine_pose_equivalence():
         return (len(size), len(rows)), (1, 3), "pose_equiv output parsed - the tool's format changed"
     return (int(size[0]), tuple((st, int(c), int(cut), int(fc), int(calls), int(mm))
                                 for st, c, cut, fc, calls, mm in rows)), \
-        (224, (("HO1_FN", 1626, 624, 0, 241, 0), ("PSH_FN", 2370, 1074, 0, 241, 0),
+        (232, (("HO1_FN", 1626, 624, 0, 241, 0), ("PSH_FN", 2370, 1074, 0, 241, 0),
                ("JEN_FNM", 2388, 561, 132, 241, 0))), \
         "sizeof(Geometry) - the fields applyPose's in-place path must copy; then per model: " \
         "corners, the cut rest's corners, face vertices, calls compared and calls whose " \
@@ -15190,6 +15196,54 @@ def c_engine_tie_census():
                  ("OBJETS", 99, 99, 0), ("Anekbah", 169, 165, 4)), \
         "per folder: coincident groups, those within one mesh, those across meshes; " \
         "then Anekbah's own three"
+
+
+def c_engine_geometry_release():
+    r"""A GPU backend releases what it held for a geometry that is destroyed
+    (todo/optimization.md step 26).
+
+    The GLES and Vulkan backends keyed their vertex buffers and depth-tie
+    tables by `const Geometry*` and never released them. `omk::GpuResidency`,
+    the last member of `Geometry`, is marked when a backend first keeps
+    something for it, and its destructor notifies the backends; they erase
+    their entries at once and delete the GPU objects at the next `begin`.
+
+    `gles_probe`'s sixth section draws a copy of Aapkayl, destroys it, and
+    checks that exactly one geometry was released and one buffer fewer is
+    held; then draws a new, SHIFTED geometry with the same revision - which
+    the allocator places at the dead one's address - and compares it with a
+    fresh one: 0 pixels differ. Measured 2026-09-29 (M3): released 1, held
+    1 -> 2 -> 1, the SAME address, 0 differing. The street and a shoot phase
+    through the GLES viewer draw byte-identical frames with the release on
+    and off (`OMK_NO_GEOMETRY_RELEASE=1`).
+
+    SHOWN TO FAIL, 2026-09-29: see the step's log for the mutation.
+    """
+    import platform
+    import subprocess
+    if platform.system() != "Darwin":
+        return ("skipped",), ("skipped",), "the probe makes its context with CGL (macOS)"
+    eng = os.path.join(ROOT, "engine")
+    model = omkpaths.data("MESHES/DECORS/Aapkayl.3DO")
+    if not os.path.isdir(eng) or not os.path.exists(model):
+        return ("skipped",), ("skipped",), "engine/ or Aapkayl.3DO absent"
+    b = subprocess.run(["make", "-s", "gles-probe"], cwd=eng, capture_output=True, text=True)
+    binp = os.path.join(eng, "build", "gles_probe")
+    if b.returncode != 0 or not os.path.exists(binp):
+        return ("build failed",), ("built",), "engine/ must build"
+    r = subprocess.run([binp, omkpaths.data_root(), model, "3526,1015,-905",
+                        "3412,1032,-882", "83"], capture_output=True, text=True)
+    m = re.search(r"^geometry release: drawn and destroyed, (-?\d+) released and (-?\d+) buffer "
+                  r"fewer \(held (\d+) -> (\d+) -> (\d+)\); a new geometry at the (SAME|another) "
+                  r"address differs from a fresh one in (\d+) pixels$", r.stdout, re.M)
+    # a parse that reads nothing must fail AS A PARSE, not answer
+    if not m:
+        return ("unparsed",), ("parsed",), "gles_probe's geometry-release line is missing - " \
+            "the tool's format changed, or no GL context"
+    rel, fewer, _h0, _h1, _h2, where, differ = m.groups()
+    return (int(rel), int(fewer), int(differ)), (1, 1, 0), \
+        "geometries released and buffers fewer after a drawn geometry is destroyed; then " \
+        "pixels a new geometry at a reused address differs from a fresh one"
 
 
 def c_engine_vita_printf():
@@ -39089,6 +39143,7 @@ SLOW = [
     ("engine: gles backend", c_engine_gles_backend, "todo/vita-port.md 0; backends/gles/glesrender.cpp"),
     ("engine: gles state cache", c_engine_gles_state_cache, "todo/optimization.md 17; backends/gles/glesrender.cpp"),
     ("engine: tie census", c_engine_tie_census, "todo/optimization.md 27; o3de/depthtie.h"),
+    ("engine: geometry release", c_engine_geometry_release, "todo/optimization.md 26; o3de/geom3do.h"),
     ("engine: gles pose", c_engine_gles_pose, "todo/gpu-skinning.md 1; backends/gles/glesrender.cpp"),
     ("engine: vita build", c_engine_vita_build, "todo/vita-port.md B1; backends/vita/CMakeLists.txt"),
     ("engine: vita printf", c_engine_vita_printf, "todo/vita-port.md; backends/vita/c99format.h"),

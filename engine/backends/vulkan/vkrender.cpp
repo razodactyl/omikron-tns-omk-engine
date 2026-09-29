@@ -179,6 +179,19 @@ public:
     omk::RasterStats stats() const override { return st_; }
     const char* name() const override { return "vulkan"; }
     ~VulkanRenderer() override;
+    // A geometry the renderer holds state for tells it when it is destroyed
+    // (`omk::GpuResidency`, todo/optimization.md step 26): the maps are cleared
+    // at once and the buffers destroyed at the next `begin`, when the previous
+    // frame's fence has been waited on. `OMK_NO_GEOMETRY_RELEASE=1` keeps the
+    // old behaviour, to compare.
+    VulkanRenderer() {
+        releaseOn_ = std::getenv("OMK_NO_GEOMETRY_RELEASE") == nullptr;
+        omk::addGeometryListener(&VulkanRenderer::geometryGone, this);
+    }
+    bool releaseOn_ = true;
+    std::vector<std::pair<VkBuffer, VkDeviceMemory>> deadBufs_;
+    long released_ = 0;
+    static void geometryGone(void* self, const omk::Geometry* g);
     // The enhancement (renderer.h). Recorded here and honoured in makeTarget,
     // where the device's own limits get the last word.
     bool setMultisample(int samples) override {
@@ -1852,6 +1865,7 @@ bool VulkanRenderer::uploadGeometry(const omk::Geometry* g) {
     std::memcpy(p, v.data(), bytes);
     vkUnmapMemory(dev_, m);
     vbo_[g] = {b, m};
+    g->resident.mark();
     vboN_[g] = v.size();
     vboRev_[g] = g->revision;
     tie_[g].vboReplaced();
@@ -2047,6 +2061,12 @@ void VulkanRenderer::shadowPass(const omk::View& v, std::span<const omk::Draw> c
 
 void VulkanRenderer::begin(const omk::View& view) {
     st_ = omk::RasterStats{};
+    // the previous frame's fence has been waited on (the present ends with it)
+    for (auto& bm : deadBufs_) {
+        vkDestroyBuffer(dev_, bm.first, nullptr);
+        vkFreeMemory(dev_, bm.second, nullptr);
+    }
+    deadBufs_.clear();
     fog_ = view.fog;
     fogStart_ = view.fogStart;
     fogEnd_ = view.fogEnd;
@@ -2327,9 +2347,30 @@ const omk::Surface& VulkanRenderer::readback() {
     return fb_;
 }
 
+void VulkanRenderer::geometryGone(void* self, const omk::Geometry* g) {
+    auto* r = static_cast<VulkanRenderer*>(self);
+    if (!r->releaseOn_) return;
+    bool had = false;
+    if (auto it = r->vbo_.find(g); it != r->vbo_.end()) {
+        r->deadBufs_.push_back(it->second);
+        r->vbo_.erase(it);
+        had = true;
+    }
+    r->vboN_.erase(g);
+    r->vboRev_.erase(g);
+    had |= r->tie_.erase(g) > 0;
+    if (had) ++r->released_;
+}
+
 VulkanRenderer::~VulkanRenderer() {
+    omk::removeGeometryListener(&VulkanRenderer::geometryGone, this);
     if (!dev_) return;
     vkDeviceWaitIdle(dev_);
+    for (auto& bm : deadBufs_) {
+        vkDestroyBuffer(dev_, bm.first, nullptr);
+        vkFreeMemory(dev_, bm.second, nullptr);
+    }
+    deadBufs_.clear();
     for (auto& [g, bm] : vbo_) {
         vkDestroyBuffer(dev_, bm.first, nullptr);
         vkFreeMemory(dev_, bm.second, nullptr);

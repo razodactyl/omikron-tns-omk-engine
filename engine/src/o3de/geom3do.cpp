@@ -2,12 +2,36 @@
 #include "o3de/geom3do.h"
 
 #include <cmath>
+#include <cstddef>
 
 #include <algorithm>
 #include <map>
 #include <optional>
 
 namespace omk {
+
+namespace {
+struct Listener { GeometryGone fn = nullptr; void* ctx = nullptr; };
+Listener g_geometryListeners[8];
+}  // namespace
+
+void addGeometryListener(GeometryGone fn, void* ctx) {
+    for (auto& l : g_geometryListeners)
+        if (!l.fn) { l.fn = fn; l.ctx = ctx; return; }
+}
+
+void removeGeometryListener(GeometryGone fn, void* ctx) {
+    for (auto& l : g_geometryListeners)
+        if (l.fn == fn && l.ctx == ctx) l = Listener{};
+}
+
+GpuResidency::~GpuResidency() {
+    if (!on_) return;
+    const auto* g = reinterpret_cast<const Geometry*>(
+        reinterpret_cast<const char*>(this) - offsetof(Geometry, resident));
+    for (const auto& l : g_geometryListeners)
+        if (l.fn) l.fn(l.ctx, g);
+}
 namespace {
 
 // A vertex index is per-MESH, so each mesh's block starts at the running sum

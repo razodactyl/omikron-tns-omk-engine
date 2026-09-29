@@ -178,13 +178,16 @@ std::vector<Draw> inFrontOf(const std::vector<Draw>& in,
     return out;
 }
 
-void runPass(Renderer& r, const View& v, const std::vector<Draw>& ds) {
+void runPass(Renderer& r, const View& v, std::span<const Draw> ds) {
     // THE SHADOW MAP's depth pass, before the frame's own - `todo/enhancements`
     // row 6, and a no-op on every backend that does not implement it. Only the
     // batches flagged `castsShadow` go in; see `renderer.h`'s View for why
     // that is characters alone.
     if (v.shadow.on) {
-        std::vector<Draw> casters;
+        // kept across frames for its capacity (main thread only, as every
+        // caller of `drawWithMirror` is; todo/optimization.md step 18)
+        static std::vector<Draw> casters;
+        casters.clear();
         for (const auto& d : ds) if (d.castsShadow) casters.push_back(d);
         if (!casters.empty()) r.shadowPass(v, casters);
     }
@@ -216,12 +219,22 @@ MirrorStats drawWithMirror(Renderer& r, std::span<const Draw> draws,
     // pool in a handful of frames, then bound a set that had failed to
     // allocate. The caller sets them when it loads the set
     // (`Renderer::setTextures`).
-    std::vector<Draw> scene, mirror;
+    //
+    // THE LISTS ARE KEPT ACROSS FRAMES (todo/optimization.md step 18's
+    // leftovers): this built a scene list, a mirror list and their
+    // concatenation - three copies of the frame's draws - on every frame,
+    // mirror or not. Main thread only, as every caller is.
+    static std::vector<Draw> scene, mirror, all;
+    scene.clear();
+    mirror.clear();
     splitList(draws, scene, mirror);
 
     // No mirror in this set, or none visible: one pass, exactly as before.
     if (!mp.found || mirror.empty()) {
-        std::vector<Draw> all = scene;
+        // With no mirror draw, `splitList` left every draw whole and in
+        // order, so the concatenation IS the input: draw it as it came.
+        if (mirror.empty()) { runPass(r, v, draws); return st; }
+        all.assign(scene.begin(), scene.end());
         all.insert(all.end(), mirror.begin(), mirror.end());
         runPass(r, v, all);
         return st;
@@ -235,7 +248,7 @@ MirrorStats drawWithMirror(Renderer& r, std::span<const Draw> draws,
                           n[2] * v.cam.eye[2] + d;
     st.distance = distEye;
     if (distEye <= 0.0f) {
-        std::vector<Draw> all = scene;
+        all.assign(scene.begin(), scene.end());
         all.insert(all.end(), mirror.begin(), mirror.end());
         runPass(r, v, all);
         return st;
@@ -296,7 +309,7 @@ MirrorStats drawWithMirror(Renderer& r, std::span<const Draw> draws,
     // room's own depth already applied, using nothing but the boundary.
     runPass(r, v, scene);
     const Surface without = r.readback();
-    std::vector<Draw> all = scene;
+    all.assign(scene.begin(), scene.end());
     all.insert(all.end(), mirror.begin(), mirror.end());
     runPass(r, v, all);
     const Surface& out = r.readback();

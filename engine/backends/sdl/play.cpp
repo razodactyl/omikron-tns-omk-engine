@@ -3913,6 +3913,23 @@ int main(int argc, char** argv) {
         std::vector<float> lights;
         int   lightCount = 0;
         bool  lightsBlack = false;
+        // THE WALKER'S OWN POSE BUFFER, kept across frames: `composePose`
+        // fills it in place (todo/optimization.md step 18's leftovers) where
+        // it built a fresh vector for every body every frame.
+        std::vector<omk::MeshPose> pose;
+        // WHAT A WALKER'S MODEL AND CLIP DECIDE, cached (step 19): the
+        // skeleton root its tracks name, the rest geometry cut to it, and the
+        // two foot bones' mesh indices under that root - each recomputed every
+        // frame before, by a mesh walk, two map lookups (one by a string) and
+        // two name searches. Valid while the model, its tracks, the model's
+        // NAME and `pedCacheGen` are what they were when it was filled.
+        long cacheGen = -1;
+        const CharModel* cacheMo = nullptr;
+        const omk::NodeTracks* cacheTracks = nullptr;
+        std::string cacheModel;
+        int cacheRoot = -1;
+        const omk::Geometry* cacheRest = nullptr;
+        int cacheFoot[2] = {-1, -1};
     };
     std::vector<std::unique_ptr<PedStaged>> pedStaged;
     std::map<std::string, std::map<int, omk::Geometry>> pedLodRest;   // model -> root mesh -> its subtree's rest
@@ -4031,6 +4048,9 @@ int main(int argc, char** argv) {
         return best;
     };
     std::map<std::pair<int, int>, omk::NodeTracks> pedTracks;   // (sex, clip slot) -> its tracks
+    // bumped wherever `pedTracks` or `pedStaged` is cleared: a walker's cached
+    // root / rest / feet (`PedStaged::cacheGen`) are then taken afresh
+    long pedCacheGen = 0;
     std::vector<std::byte> pedAni;
     std::string pedAniName;
     int pedDrawn = 0, pedLive = 0, pedInAction = 0, pedIdle = 0;
@@ -15626,8 +15646,15 @@ int main(int argc, char** argv) {
                     for (int k = 0; k < 3; ++k) s.at[k] = s.progBase[k];
                     s.pelvis = s.progPelvis;
                 }
-                std::vector<omk::MeshPose> pose;
-                std::vector<float> fv;
+                // SCRATCH KEPT ACROSS BODIES AND FRAMES (todo/optimization.md step 18's
+                // leftovers): cleared here, so every body starts from an empty pose as it
+                // did when these were fresh locals. Main thread only, like this loop.
+                static std::vector<omk::MeshPose> stagedPoseScratch;
+                static std::vector<float> stagedFvScratch;
+                std::vector<omk::MeshPose>& pose = stagedPoseScratch;
+                std::vector<float>& fv = stagedFvScratch;
+                pose.clear();
+                fv.clear();
                 float rootW = 0.0f;      // how much of the position the scene owns
                 int rootFrame = 0;
                 // Whether this frame is holding the last beat's pose. It
@@ -15702,10 +15729,10 @@ int main(int argc, char** argv) {
                         const auto mixed = omk::blendTracks(s.sceneTracks, idleFrame, false,
                                                             s.lineTracks, frame,
                                                             cancelLineRoot, w);
-                        pose = omk::composePose(s.mo->meshes, mixed, 0, false);
+                        omk::composePose(s.mo->meshes, mixed, 0, false, pose);
                     } else {
-                        pose = omk::composePose(s.mo->meshes, s.lineTracks, frame,
-                                                cancelLineRoot);
+                        omk::composePose(s.mo->meshes, s.lineTracks, frame,
+                                                cancelLineRoot, pose);
                     }
                     // THE PLACEMENT IS THE SCENE CLIP'S, WHOLE, WHILE A LINE
                     // PLAYS. A line changes the POSE, never where the body
@@ -15742,7 +15769,7 @@ int main(int argc, char** argv) {
                     // character's real orientation, lying on the floor and
                     // getting up (`Anim_ApplyNodeFrame` applies every node's
                     // quaternion, the root's included).
-                    pose = omk::composePose(s.mo->meshes, s.sceneTracks, rootFrame, false);
+                    omk::composePose(s.mo->meshes, s.sceneTracks, rootFrame, false, pose);
                     rootW = 1.0f;
                     src = "a scene program's clip";
                 } else if (shootTracks && shootTracks->valid()) {
@@ -15783,19 +15810,19 @@ int main(int argc, char** argv) {
                     int ff = static_cast<int>(fightRun.foeChannel->frame()) - 1;
                     if (ff < 0) ff = 0;
                     if (ff >= fightRun.foePose.frames) ff = fightRun.foePose.frames - 1;
-                    pose = omk::composePose(s.mo->meshes, fightRun.foePose, ff, false);
+                    omk::composePose(s.mo->meshes, fightRun.foePose, ff, false, pose);
                     src = "the fight channel's own clip";
                 } else if (s.inertAfterFight && !s.lastPose.empty()) {
                     pose = s.lastPose;
                     src = "the fight's last pose (ACTOR_STATE 0 after sub_445AC0 - no tick)";
                 } else if (s.idle.valid()) {
-                    pose = omk::composePose(s.mo->meshes, s.idle, 0, false);
+                    omk::composePose(s.mo->meshes, s.idle, 0, false, pose);
                     src = "the bank's default entry, frame 0";
                 } else if (!s.lastPose.empty()) {
                     pose = s.lastPose;
                     src = "the last pose it was given (nothing drives it now)";
                 } else {
-                    pose = omk::composePose(s.mo->meshes, omk::NodeTracks{}, 0, false);
+                    omk::composePose(s.mo->meshes, omk::NodeTracks{}, 0, false, pose);
                 }
                 if (useLine || s.sceneTracks.valid() || (shootTracks && shootTracks->valid()) ||
                     (fightRun.active && fightRun.body == &s && fightRun.foePose.valid()) ||
@@ -16507,12 +16534,14 @@ int main(int argc, char** argv) {
                     pedAniName = rs.ani;
                     pedAni = fs.read("ANIMS/" + rs.ani + ".ANI");
                     pedTracks.clear();
+                    ++pedCacheGen;
                 }
                 const auto& ws = pd.movers();
                 if (pedStaged.size() != ws.size()) {
                     pedStaged.clear();
                     for (std::size_t i = 0; i < ws.size(); ++i) pedStaged.push_back(std::make_unique<PedStaged>());
                     pedTracks.clear();
+                    ++pedCacheGen;
                 }
                 const float reach = omk::kLodDistances[3];
                 pedFootOffMax = 0.0f;
@@ -16534,8 +16563,22 @@ int main(int argc, char** argv) {
                         p.clipWas = w.clip;
                         p.tracks = pedTracksFor(w.sex, *w.clip, p.mo->meshes);
                     }
-                    const int lodRoot = p.tracks ? skeletonRootOf(*p.mo, *p.tracks) : p.mo->root;
-                    const omk::Geometry& rest = lodRestFor(w.model, *p.mo, lodRoot);
+                    if (p.cacheGen != pedCacheGen || p.cacheMo != p.mo || p.cacheTracks != p.tracks ||
+                        p.cacheModel != w.model) {
+                        p.cacheGen = pedCacheGen;
+                        p.cacheMo = p.mo;
+                        p.cacheTracks = p.tracks;
+                        p.cacheModel = w.model;
+                        p.cacheRoot = p.tracks ? skeletonRootOf(*p.mo, *p.tracks) : p.mo->root;
+                        p.cacheRest = &lodRestFor(w.model, *p.mo, p.cacheRoot);
+                        for (int f = 0; f < 2; ++f) {
+                            const char* bone = f == 0 ? "Piedg" : "Piedd";
+                            p.cacheFoot[f] = p.mo->boneIdx.built() ? p.mo->boneIdx.find(bone, p.cacheRoot)
+                                                                   : omk::findMeshContaining(p.mo->meshes, bone, p.cacheRoot);
+                        }
+                    }
+                    const int lodRoot = p.cacheRoot;
+                    const omk::Geometry& rest = *p.cacheRest;
                     int frame = static_cast<int>(std::floor(w.clock)) - 1;
                     if (frame < 0) frame = 0;
                     if (p.tracks && frame >= p.tracks->frames) frame = p.tracks->frames - 1;
@@ -16575,15 +16618,14 @@ int main(int argc, char** argv) {
                         const auto& w = ws[j.i];
                         PedStaged& p = *pedStaged[j.i];
                         const omk::Geometry& rest = *j.rest;
-                        const int lodRoot = j.lodRoot;
                         const int frame = j.frame;
                         // The per-body times are the JOB's own, summed in index
                         // order after the pass: `spanned` writes a shared map and
                         // this body may be running on another thread.
                         const double tc0 = phaseNow();
-                        std::vector<omk::MeshPose> pose = p.tracks
-                            ? omk::composePose(p.mo->meshes, *p.tracks, frame, false)
-                            : omk::composePose(p.mo->meshes, omk::NodeTracks{}, 0, false);
+                        std::vector<omk::MeshPose>& pose = p.pose;
+                        if (p.tracks) omk::composePose(p.mo->meshes, *p.tracks, frame, false, pose);
+                        else omk::composePose(p.mo->meshes, omk::NodeTracks{}, 0, false, pose);
                         const double tc1 = phaseNow();
                         // THE GPU PATH (todo/gpu-skinning.md step 3): where the
                         // renderer poses bodies and the lights that reach this
@@ -16669,11 +16711,8 @@ int main(int argc, char** argv) {
                         // `Slider_PlaceShadow`'s two nodes, on the same transform.
                         p.footKnown = false;
                         {
-                            const int fi[2] = {
-                                p.mo->boneIdx.built() ? p.mo->boneIdx.find("Piedg", lodRoot)
-                                                          : omk::findMeshContaining(p.mo->meshes, "Piedg", lodRoot),
-                                p.mo->boneIdx.built() ? p.mo->boneIdx.find("Piedd", lodRoot)
-                                                          : omk::findMeshContaining(p.mo->meshes, "Piedd", lodRoot)};
+                            // the serial pass's cache, for this model and root
+                            const int fi[2] = {p.cacheFoot[0], p.cacheFoot[1]};
                             if (fi[0] >= 0 && fi[1] >= 0 &&
                                 static_cast<std::size_t>(fi[0]) < pose.size() &&
                                 static_cast<std::size_t>(fi[1]) < pose.size()) {

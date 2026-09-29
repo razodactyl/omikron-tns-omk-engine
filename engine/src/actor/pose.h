@@ -152,6 +152,10 @@ struct MeshPose {
 std::vector<MeshPose> composePose(const std::vector<Mesh>& meshes,
                                   const NodeTracks& t, int frame,
                                   bool upright = true);
+// ...into `out`, which keeps its capacity - the same poses, for a caller that
+// composes one body every frame (todo/optimization.md step 18's leftovers).
+void composePose(const std::vector<Mesh>& meshes, const NodeTracks& t, int frame,
+                 bool upright, std::vector<MeshPose>& out);
 
 // ------------------------------------------------- BLENDING TWO POSES
 //

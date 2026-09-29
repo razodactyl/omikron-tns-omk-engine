@@ -359,11 +359,13 @@ struct small_buf {
 // `stack` at once, and the NEON build died in the first frame of Anekbah's
 // crowd (the core dump: main and `omk_worker0` faulting at one instruction on
 // a garbage index). Everything below is the call's own.
-std::vector<MeshPose> composePose(const std::vector<Mesh>& meshes,
-                                  const NodeTracks& t, int frame,
-                                  bool upright) {
-    std::vector<MeshPose> out(meshes.size());
-    if (meshes.empty()) return out;
+void composePose(const std::vector<Mesh>& meshes, const NodeTracks& t, int frame,
+                 bool upright, std::vector<MeshPose>& out) {
+    // `assign`, not a fresh vector: a caller that keeps `out` across frames
+    // (a walker's own, `play.cpp`) allocates once, and every entry starts from
+    // the same default `MeshPose` the by-value version constructed
+    out.assign(meshes.size(), MeshPose{});
+    if (meshes.empty()) return;
     const std::size_t nm = meshes.size();
     small_buf<char, 128> done(nm, 0), hasQ(nm, 0);
     small_buf<Quatf, 128> qof(nm, Quatf{});
@@ -459,6 +461,13 @@ std::vector<MeshPose> composePose(const std::vector<Mesh>& meshes,
             }
         }
     }
+}
+
+std::vector<MeshPose> composePose(const std::vector<Mesh>& meshes,
+                                  const NodeTracks& t, int frame,
+                                  bool upright) {
+    std::vector<MeshPose> out;
+    composePose(meshes, t, frame, upright, out);
     return out;
 }
 
@@ -543,14 +552,20 @@ void applyPose(Geometry& g, const Geometry& rest,
         faceVerts->size() == 3u * static_cast<std::size_t>(face->count) &&
         rest.cornerVertex.size() == rest.corners.size();
     {
-        // the call's own (no `thread_local`: see `composePose`)
-        std::vector<std::int32_t> cls(g.corners.size());
-        for (std::size_t i = 0; i < cls.size(); ++i) {
+        // IN PLACE (todo/optimization.md step 18's leftovers): each class is
+        // compared with the one already there as it is written, which is the
+        // old whole-vector `==` without the temporary vector and its copy,
+        // one of each for every body every frame
+        const std::size_t n = g.corners.size();
+        bool same = g.tieClass.size() == n;
+        if (!same) g.tieClass.resize(n);
+        for (std::size_t i = 0; i < n; ++i) {
             const std::int32_t mi = rest.cornerMesh[i];
-            cls[i] = (morphFaceOn && mi == face->mesh) ? (0x40000000 | rest.cornerVertex[i]) : mi;
+            const std::int32_t c = (morphFaceOn && mi == face->mesh) ? (0x40000000 | rest.cornerVertex[i]) : mi;
+            if (same && g.tieClass[i] != c) same = false;
+            g.tieClass[i] = c;
         }
-        g.tieRigidFrom = (g.tieClass == cls) ? was : 0;
-        g.tieClass = cls;
+        g.tieRigidFrom = same ? was : 0;
     }
     // The face stream only fits when it supplies exactly the vertices the
     // model's face mesh has - the count check that agrees on 150 of 153

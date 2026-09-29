@@ -36,8 +36,21 @@ public:
     bool valid() const { return step_.size() == 89 && index_.size() == 16; }
     const std::vector<std::int32_t>& step() const { return step_; }
     const std::vector<std::int32_t>& index() const { return index_; }
+
+    // THE NIBBLE LAW AS A TABLE (todo/optimization.md step 16). A channel's
+    // whole state is its predictor and its index - the step is always
+    // `step()[index]` - so one nibble's effect depends on (index, nibble)
+    // alone: a signed delta added to the predictor before the clamp, and the
+    // next index. 89 x 16 entries, built once from `step()` / `index()`; empty
+    // while the tables are not valid.
+    struct Nibble { std::int32_t delta; std::int32_t next; };
+    const Nibble& nibble(std::int32_t idx, int nib) const {
+        return lut_[static_cast<std::size_t>(idx) * 16u + static_cast<std::size_t>(nib)];
+    }
 private:
+    void buildLut();
     std::vector<std::int32_t> step_, index_;
+    std::vector<Nibble> lut_;
 };
 
 // ONE STEREO FRAME AT A TIME. A stereo stream has no header and no blocks -
@@ -51,7 +64,7 @@ public:
     void frame(std::byte b, std::int16_t& left, std::int16_t& right);
 private:
     const AdpcmTables* t_;
-    std::int32_t pred_[2], idx_[2], step_[2];
+    std::int32_t pred_[2], idx_[2];
 };
 
 // -> interleaved 16-bit PCM. `stereo` decodes two independent channels.

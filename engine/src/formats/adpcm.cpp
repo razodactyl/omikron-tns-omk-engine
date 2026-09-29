@@ -23,16 +23,38 @@ std::int32_t clampSample(std::int32_t v) {
 
 struct Channel {
     std::int32_t pred = 0;
-    std::int32_t idx = 0;
-    std::int32_t step = 7;
+    std::int32_t idx = 0;           // the step is `step()[idx]`, in the table
 };
 
 }  // namespace
+
+void AdpcmTables::buildLut() {
+    lut_.clear();
+    if (!valid()) return;
+    lut_.resize(89 * 16);
+    for (std::int32_t idx = 0; idx < 89; ++idx) {
+        const std::int32_t step = step_[static_cast<std::size_t>(idx)];
+        for (int nib = 0; nib < 16; ++nib) {
+            // the delta, WITHOUT IMA's `step >> 3` bias term - the same sum,
+            // the same shift, the same sign as the branching law this replaces
+            std::int32_t d = 0;
+            if (nib & 4) d  = 4 * step;
+            if (nib & 2) d += 2 * step;
+            if (nib & 1) d += step;
+            d >>= 2;
+            std::int32_t next = idx + index_[static_cast<std::size_t>(nib)];
+            next = next < 0 ? 0 : (next > 88 ? 88 : next);
+            lut_[static_cast<std::size_t>(idx) * 16u + static_cast<std::size_t>(nib)] =
+                Nibble{(nib & 8) ? -d : d, next};
+        }
+    }
+}
 
 AdpcmTables AdpcmTables::builtin() {
     AdpcmTables t;
     t.step_.assign(std::begin(kStep), std::end(kStep));
     t.index_.assign(std::begin(kIndex), std::end(kIndex));
+    t.buildLut();
     return t;
 }
 
@@ -58,6 +80,7 @@ AdpcmTables AdpcmTables::loadJson(const std::string& path) {
     };
     grab("\"index\"", t.index_);
     grab("\"step\"", t.step_);
+    t.buildLut();
     return t;
 }
 
@@ -70,19 +93,13 @@ std::vector<std::int16_t> adpcmDecode(std::span<const std::byte> in, bool stereo
     out.reserve(in.size() * 2);
     const int nch = stereo ? 2 : 1;
     Channel ch[2];
-    for (int c = 0; c < nch; ++c) ch[c].step = t.step()[0];
 
+    // one nibble, through the table (`AdpcmTables::nibble`): the delta
+    // WITHOUT IMA's `step >> 3` bias term, then the next index
     const auto nibble = [&](Channel& c, int nib) {
-        // the delta, WITHOUT IMA's `step >> 3` bias term
-        std::int32_t d = 0;
-        if (nib & 4) d  = 4 * c.step;
-        if (nib & 2) d += 2 * c.step;
-        if (nib & 1) d += c.step;
-        d >>= 2;
-        c.pred = clampSample(c.pred + ((nib & 8) ? -d : d));
-        c.idx += t.index()[static_cast<std::size_t>(nib)];
-        c.idx = c.idx < 0 ? 0 : (c.idx > 88 ? 88 : c.idx);
-        c.step = t.step()[static_cast<std::size_t>(c.idx)];
+        const AdpcmTables::Nibble& e = t.nibble(c.idx, nib);
+        c.pred = clampSample(c.pred + e.delta);
+        c.idx = e.next;
         return static_cast<std::int16_t>(c.pred);
     };
 
@@ -104,26 +121,22 @@ void AdpcmStereoStream::reset() {
     for (int c = 0; c < 2; ++c) {
         pred_[c] = 0;
         idx_[c] = 0;
-        step_[c] = t_->valid() ? t_->step()[0] : 7;
     }
 }
 
-// `adpcmDecode`'s own nibble law, a channel a nibble
+// `adpcmDecode`'s own nibble law, a channel a nibble, through the table.
+// Tables that are not valid have no table and decode SILENCE - the branching
+// version read `index()` / `step()` out of range there, and `MusicPlayer`
+// refuses such tables before it ever builds a stream.
 void AdpcmStereoStream::frame(std::byte b, std::int16_t& left, std::int16_t& right) {
+    if (!t_->valid()) { left = right = 0; return; }
     const auto byte = static_cast<std::uint8_t>(b);
-    const int nibs[2] = {(byte >> 4) & 0xF, byte & 0xF};
-    for (int c = 0; c < 2; ++c) {
-        const int nib = nibs[c];
-        std::int32_t d = 0;
-        if (nib & 4) d  = 4 * step_[c];
-        if (nib & 2) d += 2 * step_[c];
-        if (nib & 1) d += step_[c];
-        d >>= 2;
-        pred_[c] = clampSample(pred_[c] + ((nib & 8) ? -d : d));
-        idx_[c] += t_->index()[static_cast<std::size_t>(nib)];
-        idx_[c] = idx_[c] < 0 ? 0 : (idx_[c] > 88 ? 88 : idx_[c]);
-        step_[c] = t_->step()[static_cast<std::size_t>(idx_[c])];
-    }
+    const AdpcmTables::Nibble& l = t_->nibble(idx_[0], (byte >> 4) & 0xF);
+    const AdpcmTables::Nibble& r = t_->nibble(idx_[1], byte & 0xF);
+    pred_[0] = clampSample(pred_[0] + l.delta);
+    pred_[1] = clampSample(pred_[1] + r.delta);
+    idx_[0] = l.next;
+    idx_[1] = r.next;
     left = static_cast<std::int16_t>(pred_[0]);
     right = static_cast<std::int16_t>(pred_[1]);
 }

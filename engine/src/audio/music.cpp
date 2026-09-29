@@ -66,6 +66,7 @@ std::byte MusicPlayer::at(std::size_t i) {
 
 void MusicPlayer::pull(std::vector<float>& out, std::size_t frames) {
     if (outFrames_ == 0) return;
+    out.reserve(out.size() + 2 * frames);
     for (std::size_t f = 0; f < frames; ++f) {
         if (outPos_ >= outFrames_) {
             // THE LOOP, and it is field 1 of `music.play` - the script's

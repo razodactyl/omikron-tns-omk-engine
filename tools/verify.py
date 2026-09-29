@@ -14372,6 +14372,54 @@ def c_engine_music_storage():
         "pulls whose samples or state differ from the pre-2026-09-13 player"
 
 
+def c_engine_adpcm_table():
+    r"""The ADPCM nibble law through a table decodes the same samples, bit for
+    bit (todo/optimization.md step 16).
+
+    A channel's state is its predictor and its index (the step is always
+    `step[index]`), so a nibble's effect depends on (index, nibble) alone: a
+    signed delta and the next index. `AdpcmTables::nibble` holds the 89 x 16 of
+    them, built once, and `adpcmDecode` and `AdpcmStereoStream` - the music's
+    streaming decoder - look them up instead of branching.
+
+    `engine/tools/adpcm_equiv.cpp` keeps the branching law VERBATIM and
+    compares: every one of the 93,323,264 states a channel can be in (index
+    0..88 x nibble 0..15 x predictor -32768..32767), every TRACKS/*.ADP whole
+    and streamed, and every VOICEOFF/*.ADP mono. Measured 2026-09-29: 0
+    mismatches; on an M3 the whole-file decode ran 1469 -> 1012 ms, and a
+    music pull at the game's rate 52.0 -> 31.7 ms for 120 s of music.
+
+    SHOWN TO FAIL: clamping the next index at 87 instead of 88 in
+    `buildLut` turns it red (see the step's log for the counts).
+    """
+    import subprocess
+    eng = os.path.join(ROOT, "engine")
+    if not os.path.isdir(eng):
+        return ("skipped",), ("skipped",), "engine/ absent"
+    b = subprocess.run(["make", "-s", "build/adpcm_equiv"], cwd=eng,
+                       capture_output=True, text=True)
+    binp = os.path.join(eng, "build", "adpcm_equiv")
+    if b.returncode != 0 or not os.path.exists(binp):
+        return ("build failed",), ("built",), "engine/ must build"
+    if not os.path.exists(omkpaths.data("TRACKS/2.ADP")):
+        return ("skipped",), ("skipped",), "TRACKS absent"
+    r = subprocess.run([binp, omkpaths.data_root(), os.path.join(ROOT, "tables")],
+                       capture_output=True, text=True)
+    ex = re.search(r"^exhaustive states (\d+) mismatches (\d+)", r.stdout, re.M)
+    files = re.findall(r"^(TRACKS|VOICEOFF) files (\d+) bytes (\d+) mismatches (\d+)", r.stdout, re.M)
+    # a parse that reads nothing must fail AS A PARSE, not answer
+    if not ex or len(files) != 2:
+        return ("unparsed",), ("parsed",), "adpcm_equiv's output format no " \
+            "longer matches this check"
+    got = ((int(ex.group(1)), int(ex.group(2))),) + \
+        tuple((d, int(n), int(by), int(mm)) for d, n, by, mm in files)
+    return got, ((93323264, 0), ("TRACKS", 145, 195461595, 0),
+                 ("VOICEOFF", 17, 1394536, 0)), \
+        "the states compared and their mismatches; then per directory the " \
+        "files, their bytes, and the files whose table decode differs from " \
+        "the branching law (tracks also byte by byte through the stream)"
+
+
 def c_engine_audio_queue_bound():
     r"""With no audio device the stream is DROPPED, not queued - a headless run's
     memory stays bounded (todo/optimization.md step 5).
@@ -38922,6 +38970,7 @@ SLOW = [
     ("engine: threaded bodies", c_engine_threaded_bodies, "todo/vita-port.md P4; platform/threads.h"),
     ("engine: pixel tables", c_engine_pixel_tables, "todo/optimization.md 4; ui/surface.h"),
     ("engine: music storage", c_engine_music_storage, "todo/optimization.md 5; audio/music.h"),
+    ("engine: adpcm table", c_engine_adpcm_table, "todo/optimization.md 16; formats/adpcm.h"),
     ("engine: audio queue bound", c_engine_audio_queue_bound, "todo/optimization.md 5; backends/sdl/play.cpp"),
     ("engine: pixel sharing", c_engine_pixel_sharing, "todo/optimization.md 6; formats/tex3dt.h"),
     ("engine: sprite table", c_engine_sprite_table, "todo/optimization.md 6; backends/sdl/play.cpp"),

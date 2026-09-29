@@ -1824,6 +1824,24 @@ on the console):
 - **n**: the load panel decodes a slot's picture once per (file, slot, write) -
   `saveFileWrites()` counts `writeSaveFile`, so a save or a delete refreshes it.
 
+**Correction, 2026-09-30 - the upload counter overstated.** GLES booked a
+PARTIAL upload at the whole geometry's size, so the set's 69-run motion patch
+read as 5 MB every frame; row (a)'s "53 uploads, 7.1 MB, 34 ms" and its split
+are therefore overstated, and so is (d)'s upload share. Counted where the bytes
+are sent, the Bowie sequence on the Mac sends ~0.8 MB a frame in ~8 uploads, 7
+or so of them WHOLE buffers (geometry rebuilt every frame: particles, shadow
+quads). The Vulkan backend keeps no such counters.
+
+**The console log now attributes a frame under 150 ms**: every 60 frames
+`sections (ms, mean of 60)` (every gap between two marks - it printed only past
+`OMK_MARKS_MS`, and only when paced, so a 65 ms frame was ~50 ms unaccounted)
+and `gles world` (vertex uploads, how many whole, KB sent, ms), with new spans
+`motion patch`, `grid fixed`, `grid moving`. On the Mac the Bowie sequence
+(`--area 0 --stand 6423,-3,1675,154 --zone-enable 78`, zone 78 'BOWIE OMIKRON
+THEME') is ~5 ms of sim+draw, so the console's 65 ms has to be attributed on
+the console: scripted motion is 0.1 + 0.1 ms here against ~7 + 7 there, a
+ratio (~70x) far past the frame's (~13x).
+
 **Order proposed**: confirm the self-test on the console (a); then the cheap
 exact ones - c's hoist, e's closed form, b's buffers and fused pass, h's skip,
 n's cache; then j and k (the cull and the LOD, both the original's mechanism);

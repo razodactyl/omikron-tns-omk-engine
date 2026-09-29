@@ -147,6 +147,7 @@ void glesTakeTimings(double out[4]);
 std::string glesFrameReport();
 long glesTakePatches();
 long glesTakeTiePatches();
+void glesTakeWindow(double out[6]);
 void glesTakeStateCalls(long out[3]);
 void glesGeometryStats(Renderer*, long out[3]);
 long glesTakeOverlayRows(Renderer*);
@@ -6044,6 +6045,12 @@ int main(int argc, char** argv) {
     std::vector<std::pair<const char*, double>> phMarks;
     const auto mark = [&](const char* name) { phMarks.emplace_back(name, phaseNow()); };
     std::map<std::string, double> phSpan;
+    // ...and every SECTION between two marks, summed over the 60-frame window
+    // and printed with the spans: the per-frame breakdown prints only past
+    // `OMK_MARKS_MS` and only when paced, so a console frame of 65 ms - over
+    // budget and under 150 - left ~50 ms of it attributed to nothing
+    // (2026-09-30, the Bowie sequence).
+    std::map<std::string, double> phSection;
     const auto spanned = [&](const char* name, auto&& fn) {
         const double a = phaseNow();
         fn();
@@ -6595,6 +6602,7 @@ int main(int argc, char** argv) {
                     soupsMoved = true;
                     moved = true;
                 }
+                phSpan["motion patch"] += phaseNow() - motionPatch0;
                 if (moved) {
                     // only the patched meshes' corners changed since the last
                     // revision - the backend's vertex upload and depth tie take
@@ -6771,11 +6779,15 @@ int main(int argc, char** argv) {
             // moving one - a few hundred triangles - every moving frame.
             mark("scripted motion: soups patched");
             if (newlyMoving) std::sort(playerMovingIds.begin(), playerMovingIds.end());
-            if (newlyMoving || !playerGrid.fixed.matches(playerSoup)) rebuildFixedGrid();
-            rebuildMovingGrid();
+            spanned("grid fixed", [&] {
+                if (newlyMoving || !playerGrid.fixed.matches(playerSoup)) rebuildFixedGrid();
+            });
+            spanned("grid moving", [&] { rebuildMovingGrid(); });
             if (newlySteep) std::sort(steepMovingIds.begin(), steepMovingIds.end());
-            if (newlySteep || !playerSteepGrid.fixed.matches(playerSteep)) rebuildSteepFixedGrid();
-            rebuildSteepMovingGrid();
+            spanned("grid fixed", [&] {
+                if (newlySteep || !playerSteepGrid.fixed.matches(playerSteep)) rebuildSteepFixedGrid();
+            });
+            spanned("grid moving", [&] { rebuildSteepMovingGrid(); });
             mark("scripted motion: grids rebuilt");
             // `OMK_VERIFY_SPLIT=1`: the moved triangles' centres from above and a
             // fixed lattice over the street, probed through the two-layer grid and
@@ -21078,6 +21090,8 @@ int main(int argc, char** argv) {
             if (!presentedWorld) present(fb);
             const double pr1 = phaseNow();
             mark("present, swap");
+            for (std::size_t k = 1; k < phMarks.size(); ++k)
+                phSection[phMarks[k].first] += phMarks[k].second - phMarks[k - 1].second;
             if (phRb0 < 0.0) phRb0 = phRb1 = pr0;   // a frame with no readback
             phSum[0] += phRb0 - phTop;
             phSum[1] += phRb1 - phRb0;
@@ -21105,6 +21119,14 @@ int main(int argc, char** argv) {
                                     "%.0f state calls made, %.0f skipped\n", n,
                                     sc[0] / 60.0, sc[1] / 60.0, sc[2] / 60.0);
                     }
+                    {
+                        double gw[6];
+                        omk::glesTakeWindow(gw);
+                        std::printf("frame %ld gles world (a frame, mean of 60): %.1f vertex uploads, "
+                                    "%.1f of them whole, %.0f KB sent, %.1f ms; draws %.1f ms, ties %.1f ms\n", n,
+                                    gw[0] / 60.0, gw[5] / 60.0, gw[1] / 60.0, gw[2] / 60.0, gw[3] / 60.0,
+                                    gw[4] / 60.0);
+                    }
                     std::printf("frame %ld overlay: %ld plane rows re-sent in 60 frames\n", n,
                                 omk::glesTakeOverlayRows(glRen));
                     glSwapMs = 0.0;
@@ -21121,6 +21143,18 @@ int main(int argc, char** argv) {
                     sec = 0.0;
                 }
                 std::printf("\n");
+                {
+                    // the sections, largest first; each is the gap ENDING at its mark
+                    std::vector<std::pair<double, std::string>> secs;
+                    for (auto& [name, sec] : phSection) {
+                        if (sec * 1000.0 / 60.0 >= 0.1) secs.emplace_back(sec * 1000.0 / 60.0, name);
+                        sec = 0.0;
+                    }
+                    std::sort(secs.begin(), secs.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                    std::printf("frame %ld sections (ms, mean of 60):", n);
+                    for (const auto& [ms, name] : secs) std::printf(" %s %.1f,", name.c_str(), ms);
+                    std::printf("\n");
+                }
                 phSum[0] = phSum[1] = phSum[2] = phSum[3] = 0.0;
                 phN = 0;
             }

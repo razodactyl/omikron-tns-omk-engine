@@ -457,8 +457,12 @@ bool g_glesInTie = false;
 // in the log to say which GL call it was.
 struct GlesFrameCounts {
     double uploadMs = 0, tieMs = 0, drawMs = 0, texMs = 0;
-    long uploads = 0, uploadBytes = 0, patches = 0, patchedBuffers = 0, draws = 0;
+    long uploads = 0, uploadBytes = 0, patches = 0, patchedBuffers = 0, draws = 0, wholeUploads = 0;
 } g_glesFrame;
+// ...and the same counts summed over the 60-frame window, so a console log at
+// 65 ms a frame says what the world submit spent without waiting for a frame
+// over half a second (2026-09-30)
+GlesFrameCounts g_glesWindow;
 // THE PER-DRAW STATE, set and skipped, since the last `glesTakeStateCalls`
 // (todo/optimization.md step 17): what the draw-state cache saves.
 long g_glesStateSet = 0, g_glesStateSkipped = 0, g_glesDrawsWindow = 0;
@@ -492,6 +496,16 @@ long glesTakeTiePatches() {
 void glesTakeStateCalls(long out[3]) {
     out[0] = g_glesDrawsWindow; out[1] = g_glesStateSet; out[2] = g_glesStateSkipped;
     g_glesDrawsWindow = g_glesStateSet = g_glesStateSkipped = 0;
+}
+
+// the world frames' counts summed since the last call: uploads, KB SENT,
+// upload ms, draw ms, tie ms, and how many of the uploads were WHOLE buffers
+void glesTakeWindow(double out[6]) {
+    out[5] = static_cast<double>(g_glesWindow.wholeUploads);
+    out[0] = static_cast<double>(g_glesWindow.uploads);
+    out[1] = static_cast<double>(g_glesWindow.uploadBytes) / 1024.0;
+    out[2] = g_glesWindow.uploadMs; out[3] = g_glesWindow.drawMs; out[4] = g_glesWindow.tieMs;
+    g_glesWindow = GlesFrameCounts{};
 }
 
 // the last world frame's own counts, for a SLOW FRAME line
@@ -1130,7 +1144,9 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
     std::vector<GpuVert>& v = up_;
     v.clear();
     ++g_glesFrame.uploads;
-    g_glesFrame.uploadBytes += static_cast<long>(g->corners.size() * sizeof(GpuVert));
+    // the bytes SENT, counted where they are sent: a partial upload used to be
+    // booked here at the whole geometry's size, so the set's 69-run patch read
+    // as a 5 MB upload every frame (2026-09-30)
     if (it != vbo_.end() && it->second.n == g->corners.size()) {
         Vbo& vb = it->second;
         static const bool noDirty = std::getenv("OMK_NO_DIRTY") != nullptr;
@@ -1210,6 +1226,7 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
                     // matching `applied_` - see `foldTies`
                     foldTies(*g, v, lo, hi);
                     patchArrayBuffer(lo * sizeof(GpuVert), v.size() * sizeof(GpuVert), v.data());
+                    g_glesFrame.uploadBytes += static_cast<long>(v.size() * sizeof(GpuVert));
                 }
                 i = j + 1;
             }
@@ -1219,6 +1236,8 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
             foldTies(*g, v, 0, static_cast<std::uint32_t>(v.size() - 1));
             glBufferSubData(GL_ARRAY_BUFFER, 0,
                             static_cast<GLsizeiptr>(v.size() * sizeof(GpuVert)), v.data());
+            g_glesFrame.uploadBytes += static_cast<long>(v.size() * sizeof(GpuVert));
+            ++g_glesFrame.wholeUploads;
         }
 #if defined(__APPLE__)
         // ...and on the desktop, the BUFFER itself against a whole upload's
@@ -1252,6 +1271,8 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
     // device must answer (`todo/vita-port.md` G3).
     glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(v.size() * sizeof(GpuVert)),
                  v.data(), GL_DYNAMIC_DRAW);
+    g_glesFrame.uploadBytes += static_cast<long>(v.size() * sizeof(GpuVert));
+    ++g_glesFrame.wholeUploads;
     vb.n = v.size();
     vb.rev = g->revision;
     vbo_[g] = vb;
@@ -1327,6 +1348,12 @@ void GlesRenderer::resolveTies(const Draw& d, Vbo& vb) {
 }
 
 void GlesRenderer::begin(const View& view) {
+    g_glesWindow.uploads += g_glesFrame.uploads;
+    g_glesWindow.uploadBytes += g_glesFrame.uploadBytes;
+    g_glesWindow.uploadMs += g_glesFrame.uploadMs;
+    g_glesWindow.drawMs += g_glesFrame.drawMs;
+    g_glesWindow.tieMs += g_glesFrame.tieMs;
+    g_glesWindow.wholeUploads += g_glesFrame.wholeUploads;
     g_glesFrame = GlesFrameCounts{};
     if (!deadBufs_.empty()) {
         glDeleteBuffers(static_cast<GLsizei>(deadBufs_.size()), deadBufs_.data());
@@ -1427,6 +1454,7 @@ bool GlesRenderer::uploadPosedGeometry(const Geometry* g, PoseVbo*& out) {
         v[k].nz = g->corners[k].nz;
     }
     ++g_glesFrame.uploads;
+    ++g_glesFrame.wholeUploads;
     g_glesFrame.uploadBytes += static_cast<long>(v.size() * sizeof(GpuPoseVert));
     if (!pv.id) glGenBuffers(1, &pv.id);
     glBindBuffer(GL_ARRAY_BUFFER, pv.id);

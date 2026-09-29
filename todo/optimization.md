@@ -71,7 +71,7 @@ not a CPU figure). Against the original's 32 MB, both are the port's.
 | 10 | the posed bodies: `applyPose` in place instead of copying the rest geometry first | **in progress** 2026-09-14 - exact (tool, frames); 2000 poses 62 -> 19-25 ms; capped with steps 9 and 11: ~1-3% standing; `engine: pose equivalence` |
 | 9 | the walker's ground probe and `decorUnder` through the grid (step 2's grid never reached them) | **DONE** 2026-09-14 - exact (tool and game); ~0.5 ms a frame timed directly (0.17 ms a linear probe, ~3 a frame); capped with steps 10-11 standing: 18.6 -> 18.1-18.4 s CPU, at the edge of the noise (see below); `engine: ground grid` |
 | 15 | **the audit of 2026-09-29** (M3, GLES build) - what is left after 1-14 and GPU skinning 1-4, ranked for the Vita; see "15. The audit" below | **DONE** 2026-09-29 |
-| 16 | C2: the MUSIC decoded through a table - `AdpcmStereoStream` looks up a delta and a next index instead of branching per nibble; `pull` reuses its buffer | open |
+| 16 | C2: the MUSIC decoded through a table - `AdpcmStereoStream` looks up a delta and a next index instead of branching per nibble; `pull` reserves what it appends | **DONE** 2026-09-29 - exact (93,323,264 states, 145 tracks, 17 voices); M3 whole-file decode 1469 -> 1012 ms, a 120 s music pull 52.0 -> 31.7 ms; `engine: adpcm table`. Smaller than the audit said - see "16." below |
 | 17 | C1: the GLES SUBMIT - state that has not changed is not set again (blend, depth mask, texture, uniforms, attributes), and a buffer's dirty runs a small gap apart go in one write | open |
 | 18 | C3: the engine's per-frame HEAP churn, ~600 allocations and ~2.4 MB a frame - the sites listed in step 15 | open |
 | 19 | C4: per-body lookups that never change - foot bones, `charModelFor`/`lodRestFor`, `skeletonRootOf`, shadow bone meshes, `composePose`'s parent table - cached per model or body | open |
@@ -1465,7 +1465,7 @@ posing has since taken most of the body cost, which leaves SUBMIT largest.
 | # | found | measured / read | exact fix |
 |---|---|---|---|
 | C1 | `GlesRenderer::submit` sets blend, depth mask, texture, 7 uniforms and 4-6 attributes on EVERY draw; 69-108 buffer patches a frame, each a driver call | M3 sample: `glBufferSubData` ~19% of the main thread, the tie's patches ~6% more; ~85% of all heap allocations are the Mac driver's, one per GL call | skip unchanged state; merge dirty runs a small gap apart (step 17) |
-| C2 | the music decoded a byte at a time through branches, on the main thread | console 25-34 ms a decoded second; M3 0.5-0.6 ms a frame | a delta / next-index table (step 16) |
+| C2 | the music decoded a byte at a time through branches, on the main thread | console 25-34 ms a decoded second, ~1 ms a frame averaged at 30 fps; the M3's "0.5-0.6 ms a frame" was WRONG - see 16 | a delta / next-index table (step 16) |
 | C3 | the engine's heap churn | a malloc interposer: 115-160k allocations a second at 30 fps, 14% of them from `main` - ~600 and ~2.4 MB a frame | `phSpan` (a `std::map<std::string>`, four lookups a pedestrian), `composePose`'s returned vectors, `draws` not reserved, `vis` per slot, the three motion maps rebuilt a frame, `motionLogged`'s string a motion a frame, `session.props()` by value, `pumpZoneSlots`' map and vector, `sweepSphere` / `soupInBox`'s id vectors, `particleGeometry`'s map of vectors, `applyPose`'s `tieClass` |
 | C4 | per-body lookups that never change | read | cache per model / body |
 | C5 | the player still posed on the CPU | `gpu-skinning.md` step 5 | that step |
@@ -1490,6 +1490,36 @@ does.
 Refuted on the way, so nobody repeats them: the VM's per-instruction costs
 are real but not the street's (C8); `composePose`'s parent table was already
 `n log n` since `67c7848` - it is still per call, which is C4.
+
+### 16. The music through a table - 2026-09-29, on an M3
+
+**A CORRECTION FIRST.** The audit called the music "the largest engine-owned
+span, 0.5-0.6 ms a frame" on the M3. That came from a `--frames` run, which is
+UNCAPPED and does not pace audio in real time; the same M3 paced at 30 fps
+reports `music 0.0` and `music top-up 0.0-0.1`. A standalone pull at the
+game's rate costs **0.014 ms per 1/30 s** before this step. What remains true
+is the console's own measurement: 25-34 ms for a decoded second, so about
+**1 ms a frame averaged** at 30 fps. A span read off an uncapped run
+measures the run, not the game - quote spans from a paced one.
+
+The change: a channel's state is its predictor and its index (the step is
+always `step[index]`), so a nibble's effect is a function of (index, nibble)
+alone - a signed delta added before the clamp, and the next index.
+`AdpcmTables` builds the 89 x 16 of them once; `adpcmDecode` (voice lines,
+the `.3DM` audio) and `AdpcmStereoStream` (the music) look them up.
+
+| M3, best of 5 | branching | table |
+|---|---|---|
+| 145 tracks decoded whole, 195 MB | 1469 ms | **1012 ms** (1.45x) |
+| 120 s of music pulled in quarter seconds | 52.0 ms | **31.7 ms** (1.64x) |
+
+Exact three ways in `tools/adpcm_equiv` (the branching law kept verbatim):
+all 93,323,264 channel states, every track whole AND streamed, every
+voice-over; and `engine: morph+ADPCM` 777/777 sample-identical to
+`tools/adp.py`, an independent decoder. The mutation (next index clamped at
+87) turns `engine: adpcm table` red on 3,145,728 states, 50 tracks and 5
+voices. What the A9 gains is not measured: its branch predictor is weaker
+than the M3's, which favours the table, and a 7 KB table sits in its L1.
 
 ## What is NOT in scope
 

@@ -14390,7 +14390,8 @@ def c_engine_adpcm_table():
     music pull at the game's rate 52.0 -> 31.7 ms for 120 s of music.
 
     SHOWN TO FAIL: clamping the next index at 87 instead of 88 in
-    `buildLut` turns it red (see the step's log for the counts).
+    `buildLut` turns it red: 3,145,728 states, 50 of the 145 tracks and 5 of
+    the 17 voice-overs mismatch.
     """
     import subprocess
     eng = os.path.join(ROOT, "engine")

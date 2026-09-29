@@ -1824,6 +1824,25 @@ on the console):
 - **n**: the load panel decodes a slot's picture once per (file, slot, write) -
   `saveFileWrites()` counts `writeSaveFile`, so a save or a delete refreshes it.
 
+**j and l - DONE 2026-09-30** (`play.cpp`, all three backends alike):
+- **j, the side planes**, for the set's meshes, the staged bodies and the
+  crowd, on the engine's terms (`sub_48D3B0` / `sub_48D7F0`: `n . c + d > r`
+  with the node's `+88` radius, after the distance test). Conservative where
+  the engine's frustum cannot be matched exactly - a ROLLED camera takes the
+  view rectangle's half-diagonal on both axes, the height is the larger of the
+  camera's and the letterbox strip's, 179 degrees and up takes no planes - and
+  OFF under a live mirror and under mapped shadows. Short runs of side-culled
+  meshes between two drawn runs of a batch are DRAWN THROUGH (<= 300 corners):
+  they cannot put a pixel on screen, and dropping them split one draw into two
+  (Bowie 175 -> 221 draws); distance-culled runs never are. **Byte-identical
+  with and without (`OMK_NO_SIDECULL=1`)** on the street, three Bowie frames
+  (one rolled 3 degrees), the Impasse at a -28 degree roll (letterboxed), and
+  on GLES; the street's set runs 1264 -> 593, walkers drawn 13 -> 4, the Bowie
+  frame's draws 175 -> 149.
+- **l**: the head mesh, the several-skeletons count and the skeleton root are
+  cached on the model (`CharModel::headOf`, `severalSkeletons`,
+  `skelRootByFirstId`), as `Actor_LoadModel` binds its bones once.
+
 **Correction, 2026-09-30 - the upload counter overstated.** GLES booked a
 PARTIAL upload at the whole geometry's size, so the set's 69-run motion patch
 read as 5 MB every frame; row (a)'s "53 uploads, 7.1 MB, 34 ms" and its split

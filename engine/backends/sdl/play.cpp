@@ -79,6 +79,7 @@
 #include "script/inventory.h"
 #include "script/props.h"
 #include "o3de/raster.h"
+#include "o3de/render.h"
 #include "o3de/renderer.h"
 #include "platform/boot.h"
 #include "platform/movie.h"
@@ -3679,6 +3680,18 @@ int main(int argc, char** argv) {
         int root = -1;
         std::size_t texBase = 0;      // its first slot in the pool
         bool ready = false;
+        // LOOKUPS OF THE MODEL ALONE, filled on first use and kept: they were
+        // walked per body per frame - the head's O(n^2) root search and name
+        // strings twice, the 76x76 roots count, the skeleton walk - where
+        // `Actor_LoadModel` (0x0041A730) binds its bones ONCE into the actor's
+        // slots (`optimization.md` step 28, row l).
+        mutable int headMesh = -2;                                  // -2: not yet
+        mutable int severalSkeletons = -1;                          // -1: not yet
+        mutable std::unordered_map<std::int32_t, int> skelRootByFirstId;
+        int headOf() const {
+            if (headMesh == -2) headMesh = omk::headMeshOf(meshes);
+            return headMesh;
+        }
     };
     struct CharBank {
         omk::CtlFile ctl;
@@ -3952,7 +3965,7 @@ int main(int argc, char** argv) {
     std::map<std::string, std::map<int, omk::Geometry>> pedLodRest;   // model -> root mesh -> its subtree's rest
     // The skeleton a set of tracks poses: the first track's mesh followed up
     // to its root. A model with one skeleton answers its only root.
-    const auto skeletonRootOf = [](const CharModel& mo, const omk::NodeTracks& t) -> int {
+    const auto skeletonRootWalk = [](const CharModel& mo, const omk::NodeTracks& t) -> int {
         int m = -1;
         if (!t.ids.empty() && t.ids[0] >= 0)
             for (std::size_t j = 0; j < mo.meshes.size(); ++j)
@@ -3968,13 +3981,25 @@ int main(int argc, char** argv) {
         }
         return m;
     };
+    // ...cached on the model by the first track's mesh id, the only thing
+    // of the tracks the walk reads
+    const auto skeletonRootOf = [&](const CharModel& mo, const omk::NodeTracks& t) -> int {
+        const std::int32_t key = t.ids.empty() ? std::numeric_limits<std::int32_t>::min() : t.ids[0];
+        const auto it = mo.skelRootByFirstId.find(key);
+        if (it != mo.skelRootByFirstId.end()) return it->second;
+        const int r = skeletonRootWalk(mo, t);
+        mo.skelRootByFirstId.emplace(key, r);
+        return r;
+    };
     const auto hasSeveralSkeletons = [](const CharModel& mo) {
+        if (mo.severalSkeletons >= 0) return mo.severalSkeletons == 1;
         int roots = 0;
         for (const auto& m : mo.meshes) {
             bool hasParent = false;
             for (const auto& p : mo.meshes) if (p.id == m.parent) { hasParent = true; break; }
             if (!hasParent) ++roots;
         }
+        mo.severalSkeletons = roots > 1 ? 1 : 0;
         return roots > 1;
     };
     const auto lodRestFor = [&](const std::string& model, const CharModel& mo, int rootMesh) -> const omk::Geometry& {
@@ -4070,7 +4095,7 @@ int main(int argc, char** argv) {
     long pedCacheGen = 0;
     std::vector<std::byte> pedAni;
     std::string pedAniName;
-    int pedDrawn = 0, pedLive = 0, pedInAction = 0, pedIdle = 0;
+    int pedDrawn = 0, pedLive = 0, pedInAction = 0, pedIdle = 0, pedOffView = 0;
     // how many (walker, light) pairs actually reached this frame
     int pedLit = 0;
     long pedTold = -1;
@@ -8637,7 +8662,7 @@ int main(int argc, char** argv) {
                                 // record (`meshAt`), not from the fight's intent
                                 const Staged& lb = *fightRun.body;
                                 float headY = 0.0f;
-                                const int hm = lb.mo ? omk::headMeshOf(lb.mo->meshes) : -1;
+                                const int hm = lb.mo ? lb.mo->headOf() : -1;
                                 if (hm >= 0 && lb.meshAt.size() >= (static_cast<std::size_t>(hm) + 1) * 3)
                                     headY = lb.meshAt[static_cast<std::size_t>(hm) * 3 + 1];
                                 std::printf("frame %ld: the fight's OPPONENT actor %d is drawn with his "
@@ -13859,6 +13884,51 @@ int main(int argc, char** argv) {
             }
             bool firstBody = true;
             int stagedFar = 0;                 // beyond the clip distance: not skinned
+            int stagedOff = 0;                 // outside the view's side planes: not skinned
+            // THE VIEW'S FOUR SIDE PLANES - the second half of the visible-set
+            // walk's reject. `sub_48D3B0` (scene objects: the set's meshes and
+            // the staged actors) and `sub_48D7F0` (the street crowd's
+            // instances) both follow the distance test with
+            // `n . c + d > r` on the four planes `sub_48D0D0` builds, `c` the
+            // node's centre and `r` its `+88` radius, and skip the node whole -
+            // no animation bind, no matrices, no vertices. This port took the
+            // distance half only, so everything behind the camera inside the
+            // clip distance was posed and drawn (`optimization.md` step 28 j).
+            //
+            // Conservative where the engine's cannot be matched exactly: a
+            // ROLLED camera gets a frustum whose both half-extents are the view
+            // rectangle's half-diagonal, which contains the rolled view at any
+            // angle; the height is the larger of the camera's and the
+            // letterbox strip's. And OFF where a pass draws the scene from
+            // elsewhere: a live MIRROR re-draws the same draws reflected, and
+            // mapped shadows (an enhancement) draw casters the eye cannot see.
+            // A correct cull leaves every frame byte-identical - the test.
+            // `OMK_NO_SIDECULL=1` turns it off, for that comparison.
+            static const bool noSideCull = std::getenv("OMK_NO_SIDECULL") != nullptr;
+            bool mirrorShown = false;
+            for (const auto& ws : worldSlots) if (ws.shown && ws.mirror.found) mirrorShown = true;
+            const bool sideCullSet = !noSideCull && !mirrorShown && view.cam.hfovDeg < 179.0f &&
+                                     view.cam.w > 0 && view.cam.h > 0;
+            const bool sideCullBodies = sideCullSet && !(drawShadows && shadowQuality >= 2);
+            omk::Frustum sideFr{};
+            if (sideCullSet) {
+                const int fw = view.cam.w, fh = std::max(view.cam.h, view.vh);
+                if (view.cam.rollDeg == 0.0f) {
+                    sideFr = omk::frustumFromFov(view.cam.eye, view.cam.at, view.cam.hfovDeg, fw, fh, 1000.0f);
+                } else {
+                    const double tanH = std::tan(view.cam.hfovDeg * 3.14159265358979 / 360.0);
+                    const double diag = tanH * std::sqrt(1.0 + double(fh) * fh / (double(fw) * fw));
+                    const float proj = static_cast<float>(1.0 / (2.0 * diag));
+                    sideFr = omk::frustumFromCamera(view.cam.eye, view.cam.at, proj, proj, 1, 1, 1000.0f);
+                }
+            }
+            // -> true when the sphere is wholly outside one side plane
+            const auto outsideView = [&](const float c[3], float r, bool bodies) {
+                if (!(bodies ? sideCullBodies : sideCullSet)) return false;
+                for (const auto& pl : sideFr.side)
+                    if (pl.n[0] * c[0] + pl.n[1] * c[1] + pl.n[2] * c[2] + pl.d > r) return true;
+                return false;
+            };
             for (auto& up : staged) {
                 Staged& s = *up;
                 // everything before the skinning: the pose SOURCE, the scene
@@ -15900,7 +15970,7 @@ int main(int argc, char** argv) {
                 // space through the placement below (facing, pelvis, at).
                 static const bool lookAll = std::getenv("OMK_LOOK_ALL") != nullptr;   // a diagnostic: everyone looks
                 if ((lookAll || session.looksAtPlayer(s.actor)) && s.placed && s.mo->root >= 0) {
-                    const int head = omk::headMeshOf(s.mo->meshes);
+                    const int head = s.mo->headOf();
                     if (head >= 0) {
                         const float* pp = (adventure && player) ? player->pos() : session.playerPos();
                         // the target's head: his feet less a standing head height
@@ -16004,6 +16074,12 @@ int main(int argc, char** argv) {
                     if (!skinAll && seatHeld && std::isfinite(reach) &&
                         double(ex) * ex + double(ey) * ey + double(ez) * ez > reach * reach) {
                         ++stagedFar;
+                        continue;
+                    }
+                    // ...and outside the view, on the same terms (the feet
+                    // latch taken, his last drawn position, the root radius)
+                    if (!skinAll && seatHeld && outsideView(at, rr, true)) {
+                        ++stagedOff;
                         continue;
                     }
                 }
@@ -16340,7 +16416,7 @@ int main(int argc, char** argv) {
                 s.lastAboutPelvis = aboutPelvis;
                 s.lastDrawnYaw = s.drawnYaw;
                 s.lastYawKnown = true;
-                if (const int hd = omk::headMeshOf(s.mo->meshes);
+                if (const int hd = s.mo->headOf();
                     hd >= 0 && static_cast<std::size_t>(hd) < pose.size()) {
                     const float hp[3] = {pose[static_cast<std::size_t>(hd)].pos[0] - pelvis[0],
                                          pose[static_cast<std::size_t>(hd)].pos[1] - pelvis[1],
@@ -16532,7 +16608,7 @@ int main(int argc, char** argv) {
                 // cannot have come from that path and is the CLIP's or the
                 // composition's.
                 if (stagedProbe && (n % 100) == 0 && s.mo->root >= 0) {
-                    const int hd = omk::headMeshOf(s.mo->meshes);
+                    const int hd = s.mo->headOf();
                     if (hd >= 0 && static_cast<std::size_t>(hd) < pose.size() &&
                         static_cast<std::size_t>(s.mo->root) < pose.size()) {
                         const float fwd[3] = {0.0f, 0.0f, -1.0f};
@@ -16578,14 +16654,14 @@ int main(int argc, char** argv) {
                 if (n - farTold >= 300 && !staged.empty()) {
                     farTold = n;
                     std::printf("frame %ld: staged bodies - %zu staged, %d skinned and drawn, "
-                                "%d beyond the clip distance (not skinned), %d posed by the "
-                                "renderer\n",
-                                n, staged.size(), stagedDrawn, stagedFar, stagedGpu);
+                                "%d beyond the clip distance and %d outside the view (not "
+                                "skinned), %d posed by the renderer\n",
+                                n, staged.size(), stagedDrawn, stagedFar, stagedOff, stagedGpu);
                 }
             }
             mark("staged bodies");
             // ---- THE PEDESTRIANS ---------------------------------------
-            pedDrawn = pedLive = pedInAction = pedIdle = 0;
+            pedDrawn = pedLive = pedInAction = pedIdle = pedOffView = 0;
             pedLit = 0;
             vehDrawn = vehLive = vehStopped = 0;
             {
@@ -16624,6 +16700,13 @@ int main(int argc, char** argv) {
                     if (dx * dx + dy * dy + dz * dz > reach * reach) continue;
                     if (!p.mo) p.mo = charModelFor(w.model);
                     if (!p.mo || !p.mo->ready) continue;
+                    // outside the view: `sub_48D7F0` skips the instance whole
+                    // on its model root's radius at its position
+                    if (p.mo->root >= 0 && static_cast<std::size_t>(p.mo->root) < p.mo->meshes.size() &&
+                        outsideView(w.body, p.mo->meshes[static_cast<std::size_t>(p.mo->root)].radius, true)) {
+                        ++pedOffView;
+                        continue;
+                    }
                     if (w.clip != p.clipWas) {
                         p.clipWas = w.clip;
                         p.tracks = pedTracksFor(w.sex, *w.clip, p.mo->meshes);
@@ -16861,10 +16944,10 @@ int main(int argc, char** argv) {
                     pedTold = n;
                     int pedGpu = 0;
                     for (const auto& up : pedStaged) pedGpu += up->drawn && up->gpu;
-                    std::printf("frame %ld: pedestrians - %d live, %d drawn within %.0f of the eye, "
-                                "%d at an action point, %d idling, %d light hits, %d posed by the "
-                                "renderer\n",
-                                n, pedLive, pedDrawn, reach, pedInAction, pedIdle, pedLit, pedGpu);
+                    std::printf("frame %ld: pedestrians - %d live, %d drawn within %.0f of the eye "
+                                "(%d outside the view), %d at an action point, %d idling, %d light "
+                                "hits, %d posed by the renderer\n",
+                                n, pedLive, pedDrawn, reach, pedOffView, pedInAction, pedIdle, pedLit, pedGpu);
                 }
                 // ...and the ROAD TRAFFIC on the same circuit's vehicle lanes.
                 const auto& vs = pd.vehicles();
@@ -17643,12 +17726,12 @@ int main(int argc, char** argv) {
             // is exactly this radius, and at 25 m ("Tres proche") a street
             // ends a few buildings away.
             //
-            // What is NOT applied here: the engine follows that test with the
-            // four SIDE planes, built from the same global at `25_sys.c`
-            // 11598. Those are the camera's business rather than the option's,
-            // this backend already clips to the viewport, and a wrong plane
-            // sign deletes the world silently - so only the distance half is
-            // taken, and the visible set is a superset of the engine's.
+            // ...and then the four SIDE planes, built from the same global at
+            // `25_sys.c` 11598 (`outsideView`, above the staged bodies). They
+            // were left out until 2026-09-30 because a wrong plane sign
+            // deletes the world silently; what guards that now is the test
+            // that a correct cull leaves the frame byte-identical
+            // (`OMK_NO_SIDECULL=1` for the other side of it).
             const float clipReach = static_cast<float>(clipInches);
             std::size_t runsDrawn = 0, runsCulled = 0;
             for (int slot = 0; slot < 2; ++slot) {
@@ -17668,15 +17751,31 @@ int main(int argc, char** argv) {
                 const auto visible = [&](std::int32_t mi) -> bool {
                     if (mi < 0 || static_cast<std::size_t>(mi) >= w.meshes.size()) return true;
                     std::uint8_t& v = vis[static_cast<std::size_t>(mi)];
-                    if (v != 2) return v != 0;
+                    if (v != 2) return v == 1;
                     const omk::Mesh& m = w.meshes[static_cast<std::size_t>(mi)];
                     const float dx = m.pos[0] - view.cam.eye[0];
                     const float dy = m.pos[1] - view.cam.eye[1];
                     const float dz = m.pos[2] - view.cam.eye[2];
                     const float reach = m.radius + clipReach;
-                    v = (reach * reach > dx * dx + dy * dy + dz * dz) ? 1 : 0;
-                    return v != 0;
+                    // 1 drawn, 0 beyond the distance, 3 outside the side planes
+                    v = !(reach * reach > dx * dx + dy * dy + dz * dz) ? 0
+                      : outsideView(m.pos, m.radius, false) ? 3 : 1;
+                    return v == 1;
                 };
+                // A run culled by the SIDE PLANES lies wholly outside the view
+                // and cannot put a pixel on the screen, so drawing it costs
+                // only vertices - and dropping it SPLITS the batch around it,
+                // one draw becoming two (Bowie: 175 draws -> 221, on a backend
+                // where each draw is CPU in the driver). So a short run of them
+                // between two drawn runs of one batch is drawn through. Never
+                // one culled by DISTANCE: that one would show what the engine
+                // does not.
+                const auto sideCulledOnly = [&](std::int32_t mi) {
+                    if (mi < 0 || static_cast<std::size_t>(mi) >= w.meshes.size()) return false;
+                    (void)visible(mi);
+                    return vis[static_cast<std::size_t>(mi)] == 3;
+                };
+                constexpr std::uint32_t kBridgeCorners = 300;
                 // Emit, merging adjacent surviving runs so a fully visible
                 // batch still costs one draw.
                 std::size_t i = 0;
@@ -17685,11 +17784,27 @@ int main(int argc, char** argv) {
                     const auto& first = w.runs[i];
                     std::uint32_t start = first.start, count = first.count;
                     std::size_t j = i + 1;
-                    while (j < w.runs.size() && w.runs[j].batch == first.batch &&
-                           w.runs[j].start == start + count && visible(w.runs[j].mesh)) {
-                        count += w.runs[j].count; ++j;
+                    std::size_t bridged = 0;
+                    for (;;) {
+                        while (j < w.runs.size() && w.runs[j].batch == first.batch &&
+                               w.runs[j].start == start + count && visible(w.runs[j].mesh)) {
+                            count += w.runs[j].count; ++j;
+                        }
+                        // a gap of side-culled runs, short, and a drawn run after it
+                        std::size_t k = j;
+                        std::uint32_t gap = 0;
+                        while (k < w.runs.size() && w.runs[k].batch == first.batch &&
+                               w.runs[k].start == start + count + gap && sideCulledOnly(w.runs[k].mesh) &&
+                               gap + w.runs[k].count <= kBridgeCorners) {
+                            gap += w.runs[k].count; ++k;
+                        }
+                        if (k == j || k >= w.runs.size() || w.runs[k].batch != first.batch ||
+                            w.runs[k].start != start + count + gap || !visible(w.runs[k].mesh))
+                            break;
+                        count += gap; bridged += k - j; j = k;
                     }
-                    runsDrawn += j - i;
+                    runsDrawn += j - i - bridged;
+                    runsCulled += bridged;
                     const auto& b = w.geo.batches[first.batch];
                     draws.push_back({keyOf(b.blend, b.cutout,
                                            static_cast<std::uint32_t>(b.material) + texBase),

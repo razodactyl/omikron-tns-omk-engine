@@ -176,17 +176,6 @@ bool  vulkanWorldPicture(Renderer*, int vy, int vh, std::vector<unsigned char>&)
 
 namespace {
 
-// THE INTERFACE'S MILLISECOND CLOCK, one reading a frame. The oscillators, the
-// cursor's easing, the shop and Multiplan messages, the previews' turntable
-// and the overflow arrows all run on milliseconds, as the engine's do - read
-// from `SDL_GetTicks()` in play. A `--frames` run takes it from the FRAME
-// instead (`n * 1000 / 30`), the rule the frame delta already follows ("a
-// frame-bounded run keeps the fixed 1/30 so the headless checks stay
-// deterministic"): read off the wall, a dumped frame's interface depended on
-// how fast the machine had run the frames before it (todo/optimization.md
-// step 25 - 537 pixels of a street frame, a 42x49 interface element).
-long g_uiClockMs = 0;
-
 // A scripted-key entry meaning "type the --type string here", not a scan code.
 constexpr int kTypeMarker = -1;
 // `cN` in a `--keys` list arrives as `kCharMarker - N`, so one negative range
@@ -397,7 +386,7 @@ void drawSubtitle(omk::Surface& fb, const omk::TextLayout& lay,
     // more to see.
     if (overflow > 0) {
         const int pulse = 128 + static_cast<int>(127.0 * std::sin(
-                              static_cast<double>(g_uiClockMs) * 0.006));
+                              static_cast<double>(SDL_GetTicks()) * 0.006));
         const auto tri = [&](int apexY, int baseY) {
             const int xa = dispW - 32, xb = dispW - 25, xm = dispW - 29;
             const int lo = apexY < baseY ? apexY : baseY;
@@ -6006,18 +5995,6 @@ int main(int argc, char** argv) {
     long phGpu = 0;                          // frames presented from the GPU
     std::map<std::string, long> phKept;      // ...and why the others were not
     for (;;) {
-        g_uiClockMs = frames ? static_cast<long>(n * 1000 / 30) : static_cast<long>(SDL_GetTicks());
-        // `OMK_FRAME_SLEEP_MS=N`: a frame-bounded run that is N ms a frame
-        // SLOWER and must draw the same frames - how `engine: frame-bounded
-        // determinism` shows that nothing a `--frames` run draws reads the
-        // wall clock (todo/optimization.md step 25). An instrument.
-        if (frames) {
-            static const int frameSleepMs = [] {
-                const char* e = std::getenv("OMK_FRAME_SLEEP_MS");
-                return e ? std::atoi(e) : 0;
-            }();
-            if (frameSleepMs > 0) SDL_Delay(static_cast<Uint32>(frameSleepMs));
-        }
         phTop = phaseNow();
         phRb0 = phRb1 = -1.0;
         phMarks.clear();
@@ -19264,7 +19241,7 @@ int main(int argc, char** argv) {
             // oscillator 0's 5000 ms, shown in place of line two (below).
             static std::string shopMessage;
             static long shopMessageMs = -1000000;
-            const long shopNowMs = g_uiClockMs;
+            const long shopNowMs = static_cast<long>(SDL_GetTicks());
             const auto buyText = omk::iamStrings(fs, "IAM/Buy");
             const auto str = [&](int id) {
                 return id >= 0 && id < static_cast<int>(buyText.size())
@@ -19832,7 +19809,7 @@ int main(int argc, char** argv) {
             // to the buttons when they are left empty.
             static std::string mpMessage;
             static long mpMessageMs = -1000000;
-            const long mpNowMs = g_uiClockMs;
+            const long mpNowMs = static_cast<long>(SDL_GetTicks());
             if (int request = -1, row = -1; walk->takeMultiplan(request, row)) {
                 const auto from = omk::objectList(state, src == 0 ? omk::ObjectList::Carried
                                                                    : omk::ObjectList::Second);
@@ -20123,7 +20100,7 @@ int main(int argc, char** argv) {
             // (`sub_478EC0`), the sneak previews' turntable.
             bool ringDrawn = false, weaponDrawn = false;
             {
-                const float spin = omk::UiModels::spinDegrees(g_uiClockMs);
+                const float spin = omk::UiModels::spinDegrees(static_cast<long>(SDL_GetTicks()));
                 const auto box = [&](int x, int y, int bw, int bh, int out[4]) {
                     out[0] = comp.scaleX(x); out[1] = comp.scaleY(y);
                     out[2] = comp.scaleX(x + bw) - out[0]; out[3] = comp.scaleY(y + bh) - out[1];
@@ -20265,14 +20242,14 @@ int main(int argc, char** argv) {
             // The oscillators run on a MILLISECOND clock, not on the frame
             // index - their periods are 500, 1000 and 5000 and
             // `Ui_TickScreens` advances them by the frame delta.
-            comp.setClockMs(g_uiClockMs);
+            comp.setClockMs(static_cast<long>(SDL_GetTicks()));
             // THE HIGHLIGHT. `Ui_DrawItemCursor` eases sixteen elements
             // between frames, so it needs a delta and somewhere to live; it
             // is attached rather than owned by the composer so that
             // `run_screen`'s hashes stay a pure function of the screen.
             {
                 static long uiLastMs = 0;
-                const long nowMs = g_uiClockMs;
+                const long nowMs = static_cast<long>(SDL_GetTicks());
                 comp.setDeltaMs(uiLastMs ? nowMs - uiLastMs : 33);
                 uiLastMs = nowMs;
             }

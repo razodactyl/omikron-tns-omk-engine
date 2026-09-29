@@ -72,8 +72,8 @@ not a CPU figure). Against the original's 32 MB, both are the port's.
 | 9 | the walker's ground probe and `decorUnder` through the grid (step 2's grid never reached them) | **DONE** 2026-09-14 - exact (tool and game); ~0.5 ms a frame timed directly (0.17 ms a linear probe, ~3 a frame); capped with steps 10-11 standing: 18.6 -> 18.1-18.4 s CPU, at the edge of the noise (see below); `engine: ground grid` |
 | 15 | **the audit of 2026-09-29** (M3, GLES build) - what is left after 1-14 and GPU skinning 1-4, ranked for the Vita; see "15. The audit" below | **DONE** 2026-09-29 |
 | 16 | C2: the MUSIC decoded through a table - `AdpcmStereoStream` looks up a delta and a next index instead of branching per nibble; `pull` reserves what it appends | **DONE** 2026-09-29 - exact (93,323,264 states, 145 tracks, 17 voices); M3 whole-file decode 1469 -> 1012 ms, a 120 s music pull 52.0 -> 31.7 ms; `engine: adpcm table`. Smaller than the audit said - see "16." below |
-| 17 | C1: the GLES SUBMIT - state that has not changed is not set again (blend, depth mask, texture, uniforms, attributes), and a buffer's dirty runs a small gap apart go in one write | **the state cache DONE** 2026-09-29 - exact (probe and street, same binary); 1809 -> 92 state calls over 248 draws a frame; `engine: gles state cache`. **The run merge REFUTED and not committed** - see "17." below |
-| 25 | **the GLES DIRTY UPLOAD draws a different street from a full upload** (found by step 17): 537 pixels at frame 300, and where they differ the FULL upload is the one closer to the software reference, 511 to 14 - a correctness question on the Vita's path, not a speed one | **open** |
+| 17 | C1: the GLES SUBMIT - state that has not changed is not set again (blend, depth mask, texture, uniforms, attributes), and a buffer's dirty runs a small gap apart go in one write | **the state cache DONE** 2026-09-29 - exact (probe and street, same binary); 1809 -> 92 state calls over 248 draws a frame; `engine: gles state cache`. **The run merge REFUTED and not committed** - it assumed the dirty list sorted, and it is not; see "25." below |
+| 25 | ~~the GLES dirty upload draws a different street from a full upload~~ | **CLOSED 2026-09-29 - NOT A BUG, and the finding was mine**: the different street came from step 17's own uncommitted run merge. The dirty list is complete and the partial upload exact (`OMK_DIRTY_AUDIT`); see "25." below |
 | 26 | RAM/GPU: `GlesRenderer::vbo_` / `poseVbo_` are keyed by `Geometry*` and never release a buffer - a geometry that is gone keeps its GPU buffer for the process's life | open |
 | 18 | C3: the engine's per-frame HEAP churn, ~600 allocations and ~2.4 MB a frame - the sites listed in step 15 | open |
 | 19 | C4: per-body lookups that never change - foot bones, `charModelFor`/`lodRestFor`, `skeletonRootOf`, shadow bone meshes, `composePose`'s parent table - cached per model or body | open |
@@ -1554,27 +1554,66 @@ not committed.** Two reasons, each enough alone:
 * it saves almost nothing - at a 96-corner gap the street's patch count did
   not move at all (the moving meshes are far apart in corner order), and a
   gap wide enough to take everything only went from 4 to 2 a frame;
-* it is NOT exact today. Its premise was that the buffer holds exactly
-  `foldTies(corners)` for every corner the dirty list does not name, so
-  rewriting them writes the bytes already there. A 50000-corner gap CHANGES
-  the street's frame at 1400 - so some of those corners are stale. That is
-  step 25.
+* it was NOT exact, and not for the reason first given here. It assumed the
+  dirty list was sorted (as the loop's own comment said) and so skipped a
+  run that started below the one it was widening; the list is built mesh by
+  mesh and is not sorted. The first account blamed "stale corners" in the
+  buffer and opened step 25 on it - see "25.", which closes that.
 
-**Step 25, the finding.** Same binary, `OMK_NO_DIRTY=1` (every upload whole)
-against the default (partial uploads), the street at frame 300: **537 pixels
-differ**, in a band at x 123-639, y 194-254, with the depth tie OFF as well
-as on (so it is not the tie). Laid beside the SOFTWARE reference - which
-never reads the dirty list, and whose frame is the same with it or without -
-the FULL upload is the closer at 511 of those pixels and the partial at 14.
-So on the Vita's renderer the partial upload is missing something the full
-one writes. Not bracketed further here: whether the dirty list in `play.cpp`
-misses corners that change (the scripted motion's placement went through
-NEON on 2026-09-25, after `engine: dirty corners` was written against the
-Vulkan backend), or GLES's partial path drops them. Also unresolved: the
-merge build at small gaps gave a different 1400-frame picture from the
-restored loop - cross-BUILD comparisons of these frames are not to be
-trusted until that is understood, which is why every claim above is a
-same-binary toggle.
+**Step 25** was opened here on the strength of a street frame that drew
+537 pixels differently with whole and partial uploads. It is CLOSED as not a
+bug - the next section says why, and why the evidence for it was wrong.
+
+### 25. The "dirty upload bug" - closed, and it was the merge's (2026-09-29)
+
+**What was claimed**: the GLES partial upload draws a different street from a
+whole upload (537 pixels at frame 300, in a 42x49 patch at x 440-481,
+y 155-203 of the 800x600 dump), with the whole upload the closer to the
+software reference, 511 pixels to 14.
+
+**What is true**:
+
+* the partial upload is EXACT. `OMK_DIRTY_AUDIT=1` (kept, in
+  `glesrender.cpp`) keeps a copy of each buffer's last corners and, on a
+  partial upload, finds **0 corners changed that the dirty list does not
+  name**; on the desktop it reads the buffer back after the write and finds
+  **0 corners different** from a whole upload's bytes;
+* the dirty list is **NOT SORTED** - `play.cpp` builds it mesh by mesh, ~20
+  descents a street frame. The loop that writes it does not care (each run of
+  consecutive corners is written wherever it lies), and neither do the Vulkan
+  uploader or the depth tie (per-corner writes, per-triangle stamps) - but
+  step 17's merge DID: it widened a run to the runs "after" it and so skipped
+  any run that started below it. Its comment said "sorted by construction",
+  and so did the GLES loop's; the loop's now says what is true;
+* so every "partial" street frame in step 17's comparison was drawn by the
+  merge build (at every gap, 0 included - the order bug does not need a
+  gap), and every "whole" one was not. Restored to the committed loop, the
+  partial frame is the whole upload's frame, `0b3f...`, under every condition
+  tried: a different environment, `MallocPreScribble`/`MallocScribble`, eight
+  busy cores, the thread pool off, 40 ms of sleep a frame.
+
+**How the wrong turn went, because two of its steps are traps worth naming:**
+
+1. A GLES `--frames` run BLOCKS AT FRAME 0 while the display sleeps (the
+   reader was away), and a watchdog that kills it still gets a `--dump` - of
+   frame ONE. Four such dumps agreed with each other, and that agreement was
+   read as a fix: an interface clock read off the wall (`SDL_GetTicks()` in the
+   composer) was moved onto the frame and committed (`446beb7`) as the cause.
+   It was not the cause, and it is REVERTED; its check could not be shown to
+   fail on any scenario tried, which is what gave it away. **A dump is
+   evidence only with the frame count it came from** - read `N frames
+   presented` in the log before comparing it, and hold the display awake
+   (`caffeinate -d -u`) for any GLES run.
+2. Timing looked like the cause because the different pictures grouped by
+   WHEN they were made - which they did, because they grouped by which BUILD
+   was on disk at the time. A cross-build comparison was taken for a
+   within-build one.
+
+The interface clocks DO read the wall in a `--frames` run, against the rule
+the frame delta follows. That is a real inconsistency but no frame tried shows
+it (software 90 and 300 frames, 320x240, GLES 60/150/300 frames, all
+identical with 0 and 40-60 ms of sleep a frame), so it is noted here rather
+than changed.
 
 ## What is NOT in scope
 

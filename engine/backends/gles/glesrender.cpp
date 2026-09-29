@@ -1113,6 +1113,16 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
                     else if (a.r != b.r || a.g != b.g || a.b != b.b) ++col;
                     else ++other;
                 }
+                {
+                    long descents = 0;
+                    for (std::size_t k = 1; k < g->dirtyCorners.size(); ++k)
+                        descents += g->dirtyCorners[k] < g->dirtyCorners[k - 1];
+                    if (descents)
+                        std::printf("dirty audit: geometry %p rev %llu: the list is NOT sorted - "
+                                    "%ld descents in %zu corners\n", static_cast<const void*>(g),
+                                    static_cast<unsigned long long>(g->revision), descents,
+                                    g->dirtyCorners.size());
+                }
                 if (missed)
                     std::printf("dirty audit: geometry %p rev %llu: %ld corners changed and NOT listed "
                                 "(%zu listed) - position %ld, uv %ld, colour %ld, other %ld; first %zu "
@@ -1125,8 +1135,12 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
         }
         if (partial) {
             // one call a corner would be thousands of driver calls for a
-            // walker; the dirty list is sorted by construction, so coalesce
-            // it into runs and send each run once
+            // walker, so coalesce the list into runs of consecutive corners
+            // and send each run once. The list is NOT sorted - `play.cpp`
+            // builds it mesh by mesh, ~20 descents a street frame
+            // (`OMK_DIRTY_AUDIT`) - which is fine here, since each run is
+            // written wherever it lies; a merge that assumed it was sorted
+            // skipped corners (todo/optimization.md step 25)
             const auto& dc = g->dirtyCorners;
             std::size_t i = 0;
             while (i < dc.size()) {

@@ -402,7 +402,30 @@ public:
     float animClock() const;
 
 private:
-    std::vector<int> chain(int i) const;
+    // A program step's SYNC CHAIN, in order. Returned by value, and it was a
+    // `std::vector` plus a `std::set` of the indices seen - a heap allocation
+    // per element on every tick of every program, the frame's largest source
+    // of allocations after the software rasterizer (todo/optimization.md step
+    // 18). Chains are one to a few functions long, so the first 16 live in the
+    // object itself; a longer one spills to `big`. Not a scratch member: `tick`
+    // may call `animFn` while it walks its own chain.
+    struct Chain {
+        int n = 0;
+        int inl[16];
+        std::vector<int> big;
+        void push(int v) {
+            if (n < 16) inl[n] = v;
+            else { if (big.empty()) big.assign(inl, inl + 16); big.push_back(v); }
+            ++n;
+        }
+        const int* begin() const { return n <= 16 ? inl : big.data(); }
+        const int* end() const { return begin() + n; }
+        bool has(int v) const {
+            for (const int* p = begin(); p != end(); ++p) if (*p == v) return true;
+            return false;
+        }
+    };
+    Chain chain(int i) const;
     float busySpan(int k) const;
     bool  isAnim(int k) const;
 

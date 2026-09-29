@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "o3de/shadow.h"
 
+#include <array>
+
 #include <algorithm>
 #include <cmath>
 #include <string_view>
@@ -36,14 +38,24 @@ ShadowModel loadShadowModel(const DataFs& fs) {
     return m;
 }
 
-std::vector<int> shadowBonesFor(int detail) {
-    std::vector<int> out;
+const std::vector<int>& shadowBonesFor(int detail) {
     // `Actor_DrawShadow`'s switch: -1 and 0 fall to the chest, 1 adds the head
     // and the legs, 2 adds the arms, and 3 or more returns without drawing.
-    if (detail > 2) return out;
-    for (int i = 0; i < kShadowBoneCount; ++i)
-        if (detail >= kShadowBones[i].minLevel) out.push_back(i);
-    return out;
+    // The lists are the same test as ever (`detail >= minLevel`), built once
+    // for each level -1..2. NOTE what that test gives at -1, and gave before
+    // this was a table: NOTHING, since the chest's `minLevel` is 0 - which the
+    // switch described above does not (todo/optimization.md step 18 records it
+    // as a question; it is not changed here). Below -1 is the same, empty.
+    static const std::vector<int> kNone;
+    static const auto byLevel = [] {
+        std::array<std::vector<int>, 4> t;
+        for (int lvl = -1; lvl <= 2; ++lvl)
+            for (int i = 0; i < kShadowBoneCount; ++i)
+                if (lvl >= kShadowBones[i].minLevel) t[static_cast<std::size_t>(lvl + 1)].push_back(i);
+        return t;
+    }();
+    if (detail > 2 || detail < -1) return kNone;
+    return byLevel[static_cast<std::size_t>(detail + 1)];
 }
 
 namespace {

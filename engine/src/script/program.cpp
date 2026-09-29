@@ -176,13 +176,13 @@ float Program::animClock() const {
 // correcting it.) The loader is what settles the reading; what the corpus
 // shows decisively is `sautdemon` alone, 132 authored against the flat
 // reading's 92.
-std::vector<int> Program::chain(int i) const {
-    std::vector<int> out;
-    std::set<int> seen;
+Program::Chain Program::chain(int i) const {
+    // the indices SEEN are exactly the ones already out, so "seen" is a scan
+    // of the output rather than a set beside it
+    Chain out;
     while (i >= 0 && static_cast<std::size_t>(i) < obj_->functions.size() &&
-           !seen.count(i)) {
-        seen.insert(i);
-        out.push_back(i);
+           !out.has(i)) {
+        out.push(i);
         const int s = obj_->functions[static_cast<std::size_t>(i)].sync;
         // -1 is "no sync" (the loader stores a null pointer); out of range is
         // a file the engine would refuse, and 0 of the 220 shipped have one

@@ -114,7 +114,10 @@ bool shadowBlob(Geometry& g, const ShadowModel& m, const float bone[3],
 
 // Which bones a detail level draws, as indices into `kShadowBones`. Empty for
 // a level past 2, because `Actor_DrawShadow`'s switch has no default arm.
-std::vector<int> shadowBonesFor(int detail);
+// A reference into tables built once: it is asked for every staged body every
+// frame, and each call used to build the list afresh (todo/optimization.md
+// step 18).
+const std::vector<int>& shadowBonesFor(int detail);
 
 // `o3de_FindMeshByName` (0x00436D90), and it is a SUBSTRING match on the
 // LAST hit, not an equality: `sub_436D60` is `strstr(mesh + 16, wanted)` and

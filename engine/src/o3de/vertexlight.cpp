@@ -1,10 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "o3de/vertexlight.h"
 
+#include <array>
 #include <cmath>
+#include <span>
 #include <vector>
 
 namespace omk {
+
+namespace {
+// `lightRamp(c, t) / 255` for every colour byte `c` and index `t`: 256 KB,
+// immutable after load (`applyLights`)
+const std::array<std::array<float, 256>, 256> kRamp = [] {
+    std::array<std::array<float, 256>, 256> t{};
+    for (int c = 0; c < 256; ++c)
+        for (int i = 0; i < 256; ++i)
+            t[static_cast<std::size_t>(c)][static_cast<std::size_t>(i)] =
+                static_cast<float>(lightRamp(static_cast<std::uint8_t>(c), i)) / 255.0f;
+    return t;
+}();
+}  // namespace
 
 const Light3do* strongestLightAt(const float p[3], std::span<const Light3do> lights,
                                  float* kOut) {
@@ -78,37 +93,32 @@ int applyLights(Geometry& g, std::size_t first, std::size_t count,
     // (`todo/vita-port.md`; shown by a byte-identical street render).
     struct Reach {
         float lx, ly, lz;
-        const float* ramp;          // 256 x rgb, `lightRamp` tabulated
+        const float *rr, *rg, *rb;  // `kRamp` rows for the light's three bytes
     };
-    // THE RAMP, TABULATED PER LIGHT. `(t * c) >> 8 / 255` depends only on the
-    // light's three colour bytes and the 0..255 index; the table is built for
-    // each light that REACHES this body, in this call. It was a per-colour
-    // cache kept `thread_local` - and on the Vita a `thread_local` is not per
-    // thread for the pool's kernel threads (see `composePose`), so the
-    // crowd's workers shared and raced it. Same values, the call's own.
-    std::vector<float> ramps;
-    std::vector<Reach> reach;
-    std::vector<std::uint32_t> colours;
+    // THE RAMP IS ONE TABLE FOR EVERY LIGHT (todo/optimization.md step 18).
+    // `(t * c) >> 8 / 255` depends only on a colour byte and the 0..255
+    // index, so `kRamp[c][t]` holds all 65536 of them, built once at load -
+    // where each call used to build 768 per reaching light, and three vectors
+    // to hold them, for every body every frame. Same values: the same
+    // `lightRamp` and the same division. Built by a namespace-scope
+    // initialiser, not a function-local static, so the crowd's pool threads
+    // on the Vita never meet an initialisation guard (see `composePose`).
+    // The reaching lights are few; the first 32 need no allocation.
+    Reach inl[32];
+    std::vector<Reach> spill;
+    std::size_t nReach = 0;
     for (const Light3do& l : lights) {
         float v[3];
         if (!reachOf(l, bodyPos, v)) continue;
-        reach.push_back(Reach{v[0], v[1], v[2], nullptr});
-        colours.push_back(l.colour);
+        const Reach e{v[0], v[1], v[2],
+                      kRamp[(l.colour >> 16) & 0xFF].data(),
+                      kRamp[(l.colour >> 8) & 0xFF].data(),
+                      kRamp[l.colour & 0xFF].data()};
+        if (nReach < 32) inl[nReach] = e;
+        else { if (spill.empty()) spill.assign(inl, inl + 32); spill.push_back(e); }
+        ++nReach;
     }
-    ramps.resize(reach.size() * 256 * 3);
-    for (std::size_t r = 0; r < reach.size(); ++r) {
-        const std::uint32_t colour = colours[r];
-        const auto cr = static_cast<std::uint8_t>((colour >> 16) & 0xFF);
-        const auto cg = static_cast<std::uint8_t>((colour >> 8) & 0xFF);
-        const auto cb = static_cast<std::uint8_t>(colour & 0xFF);
-        float* t3 = ramps.data() + r * 256 * 3;
-        for (int t = 0; t < 256; ++t) {
-            t3[3 * t]     = static_cast<float>(lightRamp(cr, t)) / 255.0f;
-            t3[3 * t + 1] = static_cast<float>(lightRamp(cg, t)) / 255.0f;
-            t3[3 * t + 2] = static_cast<float>(lightRamp(cb, t)) / 255.0f;
-        }
-        reach[r].ramp = t3;
-    }
+    const std::span<const Reach> reach(nReach <= 32 ? inl : spill.data(), nReach);
     if (reach.empty()) return 0;
     for (std::size_t i = first; i < first + count; ++i) {
         Corner& c = g.corners[i];
@@ -123,8 +133,7 @@ int applyLights(Geometry& g, std::size_t first, std::size_t count,
             // it, so the test this replaces mispredicted about half the time.
             int ti = static_cast<int>(t);
             ti = ti < 0 ? 0 : (ti > 255 ? 255 : ti);      // `lightRamp`'s own clamp
-            const float* rp = e.ramp + 3 * static_cast<std::size_t>(ti);
-            const float ar = rp[0], ag = rp[1], ab = rp[2];
+            const float ar = e.rr[ti], ag = e.rg[ti], ab = e.rb[ti];
             cr = cr + ar > 1.0f ? 1.0f : cr + ar;
             cg = cg + ag > 1.0f ? 1.0f : cg + ag;
             cb = cb + ab > 1.0f ? 1.0f : cb + ab;

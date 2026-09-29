@@ -17856,7 +17856,7 @@ int main(int argc, char** argv) {
                         }
                         rx = (lo[0] + hi[0]) * 0.5f; rz = (lo[1] + hi[1]) * 0.5f;
                     }
-                    const auto bones = omk::shadowBonesFor(lvl);
+                    const auto& bones = omk::shadowBonesFor(lvl);
                     // THE BODY'S OWN PATCH OF GROUND, gathered once. Fitted
                     // probes 25 vertices a blob; rescanning the whole set for
                     // each would be thousands of city-wide scans a frame.

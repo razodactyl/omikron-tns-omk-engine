@@ -1090,6 +1090,39 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
         const bool partial = !noDirty && g->dirtyTo != 0 && g->dirtyTo == g->revision &&
                              vb.rev == g->dirtyFrom;
         glBindBuffer(GL_ARRAY_BUFFER, vb.id);
+        // `OMK_DIRTY_AUDIT` (todo/optimization.md step 25): is the dirty list
+        // COMPLETE? A copy of the corners last uploaded, per buffer, and on a
+        // partial upload every corner the list does not name must be what it
+        // was. An instrument - off, it costs one static bool.
+        static const bool audit = std::getenv("OMK_DIRTY_AUDIT") != nullptr;
+        if (audit) {
+            static std::unordered_map<const Geometry*, std::vector<Corner>> shadow;
+            auto& sh = shadow[g];
+            if (partial && sh.size() == g->corners.size()) {
+                std::vector<char> listed(g->corners.size(), 0);
+                for (const std::uint32_t c : g->dirtyCorners) if (c < listed.size()) listed[c] = 1;
+                long missed = 0, pos = 0, uv = 0, col = 0, other = 0;
+                std::size_t first = ~std::size_t{0};
+                for (std::size_t k = 0; k < g->corners.size(); ++k) {
+                    if (listed[k] || std::memcmp(&sh[k], &g->corners[k], sizeof(Corner)) == 0) continue;
+                    ++missed;
+                    if (first == ~std::size_t{0}) first = k;
+                    const Corner& a = sh[k]; const Corner& b = g->corners[k];
+                    if (a.x != b.x || a.y != b.y || a.z != b.z) ++pos;
+                    else if (a.u != b.u || a.v != b.v) ++uv;
+                    else if (a.r != b.r || a.g != b.g || a.b != b.b) ++col;
+                    else ++other;
+                }
+                if (missed)
+                    std::printf("dirty audit: geometry %p rev %llu: %ld corners changed and NOT listed "
+                                "(%zu listed) - position %ld, uv %ld, colour %ld, other %ld; first %zu "
+                                "(mesh %d)\n", static_cast<const void*>(g),
+                                static_cast<unsigned long long>(g->revision), missed,
+                                g->dirtyCorners.size(), pos, uv, col, other, first,
+                                first < g->cornerMesh.size() ? g->cornerMesh[first] : -1);
+            }
+            sh = g->corners;
+        }
         if (partial) {
             // one call a corner would be thousands of driver calls for a
             // walker; the dirty list is sorted by construction, so coalesce
@@ -1126,6 +1159,24 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
             glBufferSubData(GL_ARRAY_BUFFER, 0,
                             static_cast<GLsizeiptr>(v.size() * sizeof(GpuVert)), v.data());
         }
+#if defined(__APPLE__)
+        // ...and on the desktop, the BUFFER itself against a whole upload's
+        // bytes (the tie off, so there is no fold to account for)
+        if (audit && !tieOn_) {
+            std::vector<GpuVert> got(g->corners.size());
+            glGetBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(got.size() * sizeof(GpuVert)), got.data());
+            long bad = 0; std::size_t first = ~std::size_t{0};
+            for (std::size_t k = 0; k < got.size(); ++k) {
+                const GpuVert w = gpuVert(g->corners[k]);
+                if (std::memcmp(&w, &got[k], sizeof w) != 0) { ++bad; if (first == ~std::size_t{0}) first = k; }
+            }
+            if (bad)
+                std::printf("dirty audit: buffer of %p rev %llu (%s): %ld corners differ from a whole "
+                            "upload; first %zu\n", static_cast<const void*>(g),
+                            static_cast<unsigned long long>(g->revision), partial ? "partial" : "whole",
+                            bad, first);
+        }
+#endif
         vb.rev = g->revision;
         return true;
     }

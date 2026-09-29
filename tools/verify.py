@@ -15146,6 +15146,58 @@ def c_engine_gles_state_cache():
         "lit picture; pixels differing cache-on and on a second frame"
 
 
+def c_engine_frame_determinism():
+    r"""A frame-bounded run draws the same frames however fast the machine ran
+    them (todo/optimization.md step 25).
+
+    FOUND 2026-09-29 as what looked like a GLES upload bug: the Anekbah street
+    at frame 300 drew 537 different pixels with whole uploads than with
+    partial ones. Neither upload was wrong - the buffer read back exact after
+    every partial upload, and the dirty list named every corner that changed.
+    The pixels were a 42x49 INTERFACE element, and the interface's clocks (the
+    oscillators, the cursor's easing, the shop / Multiplan messages, the
+    previews' turntable, the overflow arrows) read `SDL_GetTicks()` - so a
+    slower run (whole uploads, an audit, another build) drew a different
+    frame. `g_uiClockMs` is now read once a frame, off the wall in play and
+    `n * 1000 / 30` in a `--frames` run, the rule the frame delta follows.
+
+    This renders the street start 90 frames through the software backend,
+    once as fast as it goes and once `OMK_FRAME_SLEEP_MS=40` slower, and
+    compares the dumps byte for byte.
+
+    SHOWN TO FAIL, 2026-09-29: the composer's clock read off the wall again
+    (`comp.setClockMs(SDL_GetTicks())`) - see the step's log for the count.
+    """
+    import subprocess, tempfile
+    eng = os.path.join(ROOT, "engine")
+    if not os.path.isdir(eng):
+        return ("skipped",), ("skipped",), "engine/ absent"
+    b = subprocess.run(["make", "-s", "play"], cwd=eng, capture_output=True, text=True)
+    binp = os.path.join(eng, "build", "omk-play")
+    if b.returncode != 0 or not os.path.exists(binp):
+        return ("build failed",), ("built",), "engine/ must build (and SDL for `play`)"
+    save = os.path.join(ROOT, "traces", "save-appart.bin")
+    if not os.path.exists(save):
+        return ("skipped",), ("skipped",), "traces/save-appart.bin absent"
+    dumps = []
+    with tempfile.TemporaryDirectory() as td:
+        for sleep in ("0", "40"):
+            out = os.path.join(td, "f%s.bin" % sleep)
+            env = dict(os.environ, SDL_VIDEODRIVER="dummy", OMK_FRAME_SLEEP_MS=sleep)
+            subprocess.run([binp, omkpaths.data_root(), os.path.join(ROOT, "tables"),
+                            "--save", save, "--area", "0", "--stand", "1804,0,-6890,336",
+                            "--nofmv", "--frames", "90", "--dump", out],
+                           env=env, capture_output=True, text=True)
+            dumps.append(open(out, "rb").read() if os.path.exists(out) else b"")
+    a, c = dumps
+    if not a or len(a) != len(c):
+        return (len(a), len(c)), ("a frame", "the same size"), "both runs must write a dump"
+    differ = sum(1 for i in range(0, len(a), 2) if a[i:i + 2] != c[i:i + 2])
+    return (len(a) // 2 > 0, differ), (True, 0), \
+        "a frame was written; pixels differing between the fast run and the run " \
+        "40 ms a frame slower"
+
+
 def c_engine_vita_printf():
     r"""The Vita's printf format rewrite (`backends/vita/c99format.h`), on the
     host.
@@ -39037,6 +39089,7 @@ SLOW = [
     ("engine: vita bench", c_engine_vita_bench, "todo/vita-port.md 0; backends/vita/bench_main.cpp"),
     ("engine: gles backend", c_engine_gles_backend, "todo/vita-port.md 0; backends/gles/glesrender.cpp"),
     ("engine: gles state cache", c_engine_gles_state_cache, "todo/optimization.md 17; backends/gles/glesrender.cpp"),
+    ("engine: frame-bounded determinism", c_engine_frame_determinism, "todo/optimization.md 25; backends/sdl/play.cpp"),
     ("engine: gles pose", c_engine_gles_pose, "todo/gpu-skinning.md 1; backends/gles/glesrender.cpp"),
     ("engine: vita build", c_engine_vita_build, "todo/vita-port.md B1; backends/vita/CMakeLists.txt"),
     ("engine: vita printf", c_engine_vita_printf, "todo/vita-port.md; backends/vita/c99format.h"),

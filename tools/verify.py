@@ -15095,6 +15095,56 @@ def c_engine_gles_backend():
         "presents exact in 565; the probe's own failure count"
 
 
+def c_engine_gles_state_cache():
+    r"""The GLES backend's draw-state cache draws the SAME picture with fewer
+    calls (todo/optimization.md step 17).
+
+    `GlesRenderer::submit` set every piece of state a draw needs on every draw
+    - blend, depth mask, texture, seven uniforms, four to six attributes - and
+    on vitaGL each is real work. `DrawState` remembers what the last draw left
+    and skips a call that would set the same value; it is forgotten at `begin`
+    and at `setTextures`, and uniforms are kept per program.
+
+    `gles_probe`'s fifth section draws Aapkayl through dialog 402's camera
+    with the fog on (so its uniforms vary per draw), with the cache OFF, then
+    ON, then ON again as a second frame, in one context - so the pictures must
+    be IDENTICAL, not close - and counts the state-call groups each made.
+    Measured 2026-09-29 on an M3: 25 draws, 175 groups off and 33 on, 0 pixels
+    differing either time. The same switch (`OMK_GLES_NO_STATE_CACHE=1`) on the
+    Anekbah street, same binary: frames 300 and 1400 byte-identical, 1809 ->
+    92 state calls over 248 draws a frame.
+
+    SHOWN TO FAIL, 2026-09-29: dropping the texture id from the bind's test
+    (`!ds_.texValid` alone) - see the step's log for the counts.
+    """
+    import platform
+    import subprocess
+    if platform.system() != "Darwin":
+        return ("skipped",), ("skipped",), "the probe makes its context with CGL (macOS)"
+    eng = os.path.join(ROOT, "engine")
+    model = omkpaths.data("MESHES/DECORS/Aapkayl.3DO")
+    if not os.path.isdir(eng) or not os.path.exists(model):
+        return ("skipped",), ("skipped",), "engine/ or Aapkayl.3DO absent"
+    b = subprocess.run(["make", "-s", "gles-probe"], cwd=eng,
+                       capture_output=True, text=True)
+    binp = os.path.join(eng, "build", "gles_probe")
+    if b.returncode != 0 or not os.path.exists(binp):
+        return ("build failed",), ("built",), "engine/ must build"
+    r = subprocess.run([binp, omkpaths.data_root(), model, "3526,1015,-905",
+                        "3412,1032,-882", "83"], capture_output=True, text=True)
+    m = re.search(r"^state cache: (\d+) draws, state calls (\d+) off / (\d+) on "
+                  r"\((\d+) skipped\); lit (\d+); on differs (-?\d+), second frame "
+                  r"differs (-?\d+)$", r.stdout, re.M)
+    # a parse that reads nothing must fail AS A PARSE, not answer
+    if not m:
+        return ("unparsed",), ("parsed",), "gles_probe's state-cache line is " \
+            "missing - the tool's format changed, or no GL context"
+    draws, off, on, skipped, lit, d1, d2 = (int(x) for x in m.groups())
+    return (draws, off, on, skipped, lit > 0, d1, d2), (25, 175, 33, 142, True, 0, 0), \
+        "draws; state-call groups made with the cache off, on, and skipped; a " \
+        "lit picture; pixels differing cache-on and on a second frame"
+
+
 def c_engine_vita_printf():
     r"""The Vita's printf format rewrite (`backends/vita/c99format.h`), on the
     host.
@@ -38985,6 +39035,7 @@ SLOW = [
     ("engine: tie memory", c_engine_tie_memory, "todo/handoff-vita.md 2; o3de/depthtie.h"),
     ("engine: vita bench", c_engine_vita_bench, "todo/vita-port.md 0; backends/vita/bench_main.cpp"),
     ("engine: gles backend", c_engine_gles_backend, "todo/vita-port.md 0; backends/gles/glesrender.cpp"),
+    ("engine: gles state cache", c_engine_gles_state_cache, "todo/optimization.md 17; backends/gles/glesrender.cpp"),
     ("engine: gles pose", c_engine_gles_pose, "todo/gpu-skinning.md 1; backends/gles/glesrender.cpp"),
     ("engine: vita build", c_engine_vita_build, "todo/vita-port.md B1; backends/vita/CMakeLists.txt"),
     ("engine: vita printf", c_engine_vita_printf, "todo/vita-port.md; backends/vita/c99format.h"),

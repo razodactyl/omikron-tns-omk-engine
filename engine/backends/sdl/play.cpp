@@ -147,6 +147,7 @@ void glesTakeTimings(double out[4]);
 std::string glesFrameReport();
 long glesTakePatches();
 long glesTakeTiePatches();
+void glesTakeStateCalls(long out[3]);
 long glesTakeOverlayRows(Renderer*);
 void glesSetDepthTie(Renderer*, bool);
 bool glesPresentOverlay(Renderer*, const Surface&, const unsigned char* mask, const unsigned char* maskRows,
@@ -20975,6 +20976,14 @@ int main(int argc, char** argv) {
                                 "%.0f buffer patches a frame (%.0f the depth tie's)\n", n,
                                 g[0] / 60.0, g[1] / 60.0, g[2] / 60.0, g[3] / 60.0, glSwapMs / 60.0,
                                 omk::glesTakePatches() / 60.0, omk::glesTakeTiePatches() / 60.0);
+                    {
+                        // the draw-state cache's work (todo/optimization.md step 17)
+                        long sc[3];
+                        omk::glesTakeStateCalls(sc);
+                        std::printf("frame %ld gles state (a frame, mean of 60): %.0f draws, "
+                                    "%.0f state calls made, %.0f skipped\n", n,
+                                    sc[0] / 60.0, sc[1] / 60.0, sc[2] / 60.0);
+                    }
                     std::printf("frame %ld overlay: %ld plane rows re-sent in 60 frames\n", n,
                                 omk::glesTakeOverlayRows(glRen));
                     glSwapMs = 0.0;

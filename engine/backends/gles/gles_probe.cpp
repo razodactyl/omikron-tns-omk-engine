@@ -79,6 +79,8 @@ bool glesPresentWorld(Renderer*, int vy, int vh, int frameW, int frameH, int win
 bool glesPresentSurface(Renderer*, const Surface&, int winW, int winH);
 void glesSetWindowTarget(Renderer*, unsigned fbo);
 void glesSetDepthTie(Renderer*, bool);
+void glesSetStateCache(Renderer*, bool);
+void glesTakeStateCalls(long out[3]);
 }
 
 namespace {
@@ -548,6 +550,45 @@ int main(int argc, char** argv) {
                     bad ? (std::to_string(bad) + " DIFFERENT").c_str() : "EXACT");
         failures += bad != 0 || lit == 0;
         omk::glesSetWindowTarget(gl, 0);
+    }
+
+    // 5. THE DRAW-STATE CACHE (todo/optimization.md step 17): the same draws
+    // with the cache OFF, then ON, then ON again as a second frame (state
+    // left over from a frame must not leak into the next), with the fog on so
+    // its uniforms vary per draw - in one context, so the pictures must be
+    // IDENTICAL, not merely close. And the state calls each made.
+    {
+        omk::View v;
+        v.cam = cam; v.cam.w = W; v.cam.h = H;
+        v.dither = true;
+        v.fog = true; v.fogStart = 300.0f; v.fogEnd = 1500.0f;
+        v.fogColour[0] = 40; v.fogColour[1] = 60; v.fogColour[2] = 80;
+        long calls[3];
+        omk::glesTakeStateCalls(calls);
+        omk::glesSetStateCache(gl, false);
+        const omk::Surface off = *run(*gl, v, W, H);
+        omk::glesTakeStateCalls(calls);
+        const long offSet = calls[1];
+        omk::glesSetStateCache(gl, true);
+        const omk::Surface on1 = *run(*gl, v, W, H);
+        omk::glesTakeStateCalls(calls);
+        const long nDraws = calls[0], onSet = calls[1], onSkip = calls[2];
+        gl->begin(v);
+        for (const auto& dr : draws) gl->submit(dr);
+        gl->end();
+        const omk::Surface on2 = gl->readback();
+        const auto differ = [](const omk::Surface& a, const omk::Surface& b) {
+            long n = 0;
+            for (std::size_t i = 0; i < a.px.size() && i < b.px.size(); ++i) n += a.px[i] != b.px[i];
+            return a.px.size() == b.px.size() ? n : -1;
+        };
+        long lit = 0;
+        for (auto p : off.px) lit += p != 0;
+        const long d1 = differ(off, on1), d2 = differ(off, on2);
+        std::printf("state cache: %ld draws, state calls %ld off / %ld on (%ld skipped); "
+                    "lit %ld; on differs %ld, second frame differs %ld\n",
+                    nDraws, offSet, onSet, onSkip, lit, d1, d2);
+        failures += d1 != 0 || d2 != 0 || lit == 0;
     }
 
     delete gl;

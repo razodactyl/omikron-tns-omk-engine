@@ -456,6 +456,9 @@ struct GlesFrameCounts {
     double uploadMs = 0, tieMs = 0, drawMs = 0, texMs = 0;
     long uploads = 0, uploadBytes = 0, patches = 0, patchedBuffers = 0, draws = 0;
 } g_glesFrame;
+// THE PER-DRAW STATE, set and skipped, since the last `glesTakeStateCalls`
+// (todo/optimization.md step 17): what the draw-state cache saves.
+long g_glesStateSet = 0, g_glesStateSkipped = 0, g_glesDrawsWindow = 0;
 double glesClockMs() {
     return std::chrono::duration<double, std::milli>(
                std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -479,6 +482,13 @@ long glesTakeTiePatches() {
     const long n = g_glesTiePatchWindow;
     g_glesTiePatchWindow = 0;
     return n;
+}
+
+// draws, per-draw state calls made and state calls the cache skipped, since
+// the last call
+void glesTakeStateCalls(long out[3]) {
+    out[0] = g_glesDrawsWindow; out[1] = g_glesStateSet; out[2] = g_glesStateSkipped;
+    g_glesDrawsWindow = g_glesStateSet = g_glesStateSkipped = 0;
 }
 
 // the last world frame's own counts, for a SLOW FRAME line
@@ -625,7 +635,35 @@ private:
     bool poseSelfTest();
     bool usePosed(const Draw& d) const { return d.meshPose && d.meshPoses && posed_; }
     void useProgram(GLuint p) { if (curProg_ != p) { glUseProgram(p); curProg_ = p; } }
+
+    // THE DRAW-STATE CACHE (todo/optimization.md step 17). `submit` used to set
+    // every piece of state a draw needs on every draw - blend, depth mask,
+    // texture, seven uniforms, four to six attributes - and on vitaGL each is
+    // real work. What the last draw left is remembered here and a call that
+    // would set the same value is skipped. It is FORGOTTEN (`forgetState`) at
+    // `begin` and wherever GL is touched outside the submit path, so the first
+    // draw after either sets everything. Uniforms are per PROGRAM, so each of
+    // the two scene programs has its own. `OMK_GLES_NO_STATE_CACHE=1` turns it
+    // off, which is how `engine: gles state cache` compares the two.
+    struct UniCache {
+        bool valid = false;
+        float texW = 0, texH = 0, fogStart = 0, fogEnd = 0, fog[3] = {0, 0, 0};
+        int cutout = 0;
+        // the posed program's lights
+        int lights = -1; float lightBlack = -1; std::vector<float> lightVals;
+    };
+    struct DrawState {
+        int blend = -1;                    // a `Blend`, -1 unknown
+        GLuint tex = 0; bool texValid = false;
+        GLuint attrBuf = 0; int attrLayout = -1;   // 0 plain, 1 posed; -1 unknown
+        UniCache uni[2];                   // [0] prog_, [1] posed_
+    } ds_;
+    bool stateCache_ = true;
+    void forgetState() { ds_ = DrawState{}; }
 public:
+    // for `gles_probe`: the same draws with and without the cache, in one
+    // context (`engine: gles state cache`)
+    void setStateCache(bool on) { stateCache_ = on; forgetState(); }
     bool posesBodies() const override { return posed_ != 0; }
     int maxVertexLights() const override { return posed_ ? kVertexLights : 0; }
 private:
@@ -674,6 +712,8 @@ GlesRenderer::~GlesRenderer() {
 
 bool GlesRenderer::init(int w, int h) {
     w_ = w; h_ = h;
+    // the environment can only turn it OFF - a probe's `setStateCache` holds
+    if (std::getenv("OMK_GLES_NO_STATE_CACHE")) stateCache_ = false;
     fb_ = Surface(w, h, 0);
     rgba_.assign(static_cast<std::size_t>(w) * h * 4, 0);
     if (ready_) {
@@ -947,6 +987,7 @@ bool GlesRenderer::poseSelfTest() {
 
 void GlesRenderer::setTextures(std::span<const Texture> t) {
     const double t0 = glesClockMs();
+    forgetState();
     for (auto& [key, u] : uploaded_) u.used = false;
     tex_.assign(t.size(), Tex{});
     std::vector<unsigned char> px;
@@ -1225,6 +1266,7 @@ void GlesRenderer::begin(const View& view) {
     std::memcpy(mvp_, mvp, sizeof mvp_);
     lastPose_ = nullptr;
     lastPoseGeo_ = nullptr;
+    forgetState();
     if (posed_) {
         glUseProgram(posed_);
         glUniformMatrix4fv(posedLoc_.mvp, 1, GL_FALSE, mvp);
@@ -1392,38 +1434,74 @@ void GlesRenderer::submit(const Draw& d) {
         lastPose_ = d.meshPose;
         lastPoseGeo_ = d.geo;
     }
+    // Every call below goes through the draw-state cache (`DrawState`): `set`
+    // says whether it must be made, and counts it either way.
+    const auto set = [&](bool changed) {
+        if (changed || !stateCache_) { ++g_glesStateSet; return true; }
+        ++g_glesStateSkipped;
+        return false;
+    };
+    UniCache& U = ds_.uni[posed ? 1 : 0];
+    const bool uv = U.valid;
     if (posed) {
         // the body's lights; a draw handed more than the program holds is
         // the frontend's error, and gets the first `kVertexLights`
         const int n = d.vertexLights ? std::min(d.vertexLightCount, kVertexLights) : 0;
-        if (n > 0) glUniform4fv(L.light, 2 * n, d.vertexLights);
-        glUniform1f(L.lightCount, static_cast<float>(n));
-        glUniform1f(L.lightBlack, d.lightsFromBlack ? 1.0f : 0.0f);
+        const std::size_t nv = static_cast<std::size_t>(8 * n);
+        // compared by VALUE: a body's lights are rebuilt every frame and two
+        // bodies may hand the same array
+        const bool same = uv && U.lights == n && U.lightVals.size() == nv &&
+                          (nv == 0 || std::memcmp(U.lightVals.data(), d.vertexLights, nv * sizeof(float)) == 0);
+        if (set(!same)) {
+            if (n > 0) glUniform4fv(L.light, 2 * n, d.vertexLights);
+            glUniform1f(L.lightCount, static_cast<float>(n));
+            U.lights = n;
+            U.lightVals.assign(d.vertexLights, d.vertexLights + nv);
+        }
+        const float black = d.lightsFromBlack ? 1.0f : 0.0f;
+        if (set(!uv || U.lightBlack != black)) {
+            glUniform1f(L.lightBlack, black);
+            U.lightBlack = black;
+        }
     }
 
-    switch (d.blend) {
-    case Blend::Opaque:
-        glDisable(GL_BLEND);
-        glDepthMask(GL_TRUE);
-        break;
-    case Blend::Add:
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_ONE, GL_ONE);
-        glDepthMask(GL_FALSE);
-        break;
-    case Blend::Mul:
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_COLOR);   // dst * (1 - src)
-        glDepthMask(GL_FALSE);
-        break;
+    if (set(ds_.blend != static_cast<int>(d.blend))) {
+        switch (d.blend) {
+        case Blend::Opaque:
+            glDisable(GL_BLEND);
+            glDepthMask(GL_TRUE);
+            break;
+        case Blend::Add:
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE);
+            glDepthMask(GL_FALSE);
+            break;
+        case Blend::Mul:
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_COLOR);   // dst * (1 - src)
+            glDepthMask(GL_FALSE);
+            break;
+        }
+        ds_.blend = static_cast<int>(d.blend);
     }
 
     // The texture is the key's LOW SIX BITS and nothing else (ASSETS 4b).
     const std::size_t slot = d.bucketKey & 0x3Fu;
     const Tex& t = (slot < tex_.size() && tex_[slot].id) ? tex_[slot] : white_;
-    glBindTexture(GL_TEXTURE_2D, t.id);
-    glUniform2f(L.texSize, t.w, t.h);
-    glUniform1i(L.cutout, d.cutout ? 1 : 0);
+    if (set(!ds_.texValid || ds_.tex != t.id)) {
+        glBindTexture(GL_TEXTURE_2D, t.id);
+        ds_.tex = t.id;
+        ds_.texValid = true;
+    }
+    if (set(!uv || U.texW != t.w || U.texH != t.h)) {
+        glUniform2f(L.texSize, t.w, t.h);
+        U.texW = t.w; U.texH = t.h;
+    }
+    const int cut = d.cutout ? 1 : 0;
+    if (set(!uv || U.cutout != cut)) {
+        glUniform1i(L.cutout, cut);
+        U.cutout = cut;
+    }
 
     // THE FOG's two exclusions - the rule `renderer.cpp` applies for the
     // software loop and `vkrender.cpp` for Vulkan.
@@ -1433,31 +1511,48 @@ void GlesRenderer::submit(const Draw& d) {
         fs = fogStart_ * k;
         fe = fogEnd_ * k;
     }
-    glUniform1f(L.fogStart, fs);
-    glUniform1f(L.fogEnd, fe);
-    glUniform3f(L.fogColour, fogColour_[0], fogColour_[1], fogColour_[2]);
-
-    glBindBuffer(GL_ARRAY_BUFFER, posed ? pvb->id : vbo_[d.geo].id);
-    const GLsizei st = posed ? sizeof(GpuPoseVert) : sizeof(GpuVert);
-    glEnableVertexAttribArray(kAttrPos);
-    glEnableVertexAttribArray(kAttrUV);
-    glEnableVertexAttribArray(kAttrCol);
-    glEnableVertexAttribArray(kAttrPhase);
-    if (posed) {
-        glEnableVertexAttribArray(kAttrSlot);
-        glVertexAttribPointer(kAttrSlot, 1, GL_FLOAT, GL_FALSE, st,
-                              reinterpret_cast<const void*>(offsetof(GpuPoseVert, slot)));
-        glEnableVertexAttribArray(kAttrNormal);
-        glVertexAttribPointer(kAttrNormal, 3, GL_FLOAT, GL_FALSE, st,
-                              reinterpret_cast<const void*>(offsetof(GpuPoseVert, nx)));
-    } else {
-        glDisableVertexAttribArray(kAttrSlot);
-        glDisableVertexAttribArray(kAttrNormal);
+    if (set(!uv || U.fogStart != fs || U.fogEnd != fe)) {
+        glUniform1f(L.fogStart, fs);
+        glUniform1f(L.fogEnd, fe);
+        U.fogStart = fs; U.fogEnd = fe;
     }
-    glVertexAttribPointer(kAttrPos, 3, GL_FLOAT, GL_FALSE, st, reinterpret_cast<const void*>(0));
-    glVertexAttribPointer(kAttrUV, 2, GL_FLOAT, GL_FALSE, st, reinterpret_cast<const void*>(12));
-    glVertexAttribPointer(kAttrCol, 3, GL_FLOAT, GL_FALSE, st, reinterpret_cast<const void*>(20));
-    glVertexAttribPointer(kAttrPhase, 1, GL_FLOAT, GL_FALSE, st, reinterpret_cast<const void*>(32));
+    if (set(!uv || U.fog[0] != fogColour_[0] || U.fog[1] != fogColour_[1] || U.fog[2] != fogColour_[2])) {
+        glUniform3f(L.fogColour, fogColour_[0], fogColour_[1], fogColour_[2]);
+        for (int k = 0; k < 3; ++k) U.fog[k] = fogColour_[k];
+    }
+    U.valid = true;
+
+    // THE ATTRIBUTES. A pointer captures the buffer bound WHEN IT IS SET, so
+    // the uploads' and tie patches' own binds in between leave it alone: the
+    // same buffer in the same layout needs nothing.
+    const GLuint buf = posed ? pvb->id : vbo_[d.geo].id;
+    const int layout = posed ? 1 : 0;
+    if (set(ds_.attrBuf != buf || ds_.attrLayout != layout)) {
+        glBindBuffer(GL_ARRAY_BUFFER, buf);
+        const GLsizei st = posed ? sizeof(GpuPoseVert) : sizeof(GpuVert);
+        glEnableVertexAttribArray(kAttrPos);
+        glEnableVertexAttribArray(kAttrUV);
+        glEnableVertexAttribArray(kAttrCol);
+        glEnableVertexAttribArray(kAttrPhase);
+        if (posed) {
+            glEnableVertexAttribArray(kAttrSlot);
+            glVertexAttribPointer(kAttrSlot, 1, GL_FLOAT, GL_FALSE, st,
+                                  reinterpret_cast<const void*>(offsetof(GpuPoseVert, slot)));
+            glEnableVertexAttribArray(kAttrNormal);
+            glVertexAttribPointer(kAttrNormal, 3, GL_FLOAT, GL_FALSE, st,
+                                  reinterpret_cast<const void*>(offsetof(GpuPoseVert, nx)));
+        } else {
+            glDisableVertexAttribArray(kAttrSlot);
+            glDisableVertexAttribArray(kAttrNormal);
+        }
+        glVertexAttribPointer(kAttrPos, 3, GL_FLOAT, GL_FALSE, st, reinterpret_cast<const void*>(0));
+        glVertexAttribPointer(kAttrUV, 2, GL_FLOAT, GL_FALSE, st, reinterpret_cast<const void*>(12));
+        glVertexAttribPointer(kAttrCol, 3, GL_FLOAT, GL_FALSE, st, reinterpret_cast<const void*>(20));
+        glVertexAttribPointer(kAttrPhase, 1, GL_FLOAT, GL_FALSE, st, reinterpret_cast<const void*>(32));
+        ds_.attrBuf = buf;
+        ds_.attrLayout = layout;
+    }
+    ++g_glesDrawsWindow;
     const double fd0 = glesClockMs();
     glDrawArrays(GL_TRIANGLES, static_cast<GLint>(d.start), static_cast<GLsizei>(d.count));
     g_glesFrame.drawMs += glesClockMs() - fd0;
@@ -1745,6 +1840,10 @@ bool glesPresentOverlay(Renderer* r, const Surface& s, const unsigned char* mask
     return static_cast<GlesRenderer*>(r)->presentOverlay(s, mask, maskRows, fade, vy, vh, winW, winH);
 }
 long glesTakeOverlayRows(Renderer* r) { return static_cast<GlesRenderer*>(r)->takeOverlayRows(); }
+// the draw-state cache on or off, for a probe that compares the two
+void glesSetStateCache(Renderer* r, bool on) {
+    if (auto* g = dynamic_cast<GlesRenderer*>(r)) g->setStateCache(on);
+}
 bool glesPresentSurface(Renderer* r, const Surface& s, int winW, int winH) {
     return static_cast<GlesRenderer*>(r)->presentSurface(s, winW, winH);
 }

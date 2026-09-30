@@ -15187,6 +15187,13 @@ def c_engine_gles_tie_bake():
     byte-identical to the NO-TIE run's, 0 of 14 differing, which is the
     flicker back. The file was diffed after the edit and rebuilt after the
     restore.
+
+    THE VULKAN BACKEND takes the same bake (`vkrender.cpp`, `scene.vert`'s
+    two steps in its 0..1 window depth): measured over the 179-frame walk,
+    248 baked, 179 / 179 identical to its per-frame tie, 0 identical with no
+    tie - and the per-frame tie's loser reports fall from 12676 to 897, the
+    rest being the bodies'. Its half is shown to fail the same way (the
+    `scene.vert` step removed): `(248, False, False)`.
     """
     import platform, tempfile, shutil
     if platform.system() != "Darwin":
@@ -15196,39 +15203,51 @@ def c_engine_gles_tie_bake():
     if not os.path.isdir(eng) or not os.path.exists(save) or \
             not os.path.exists(omkpaths.data("MESHES/DECORS/ANEKBAH.3DO")):
         return ("skipped",), ("skipped",), "engine/, the save or ANEKBAH.3DO absent"
+    def walk(binp, backend, env0):
+        tmp = tempfile.mkdtemp()
+        try:
+            frames, baked = {}, None
+            for tag, extra in (("bake", {}), ("rt", {"OMK_NO_TIE_BAKE": "1"}),
+                               ("none", {"OMK_NO_TIE": "1"})):
+                d = os.path.join(tmp, tag)
+                os.makedirs(d)
+                env = dict(os.environ, OMK_TIE_LOG="1", **env0, **extra)
+                r = subprocess.run([binp, omkpaths.data_root(), os.path.join(ROOT, "tables"),
+                                    "--save", save, "--area", "0", "--stand", "6219,0,-8490,199",
+                                    "--hold", "k200*30,k203*30", "--frames", "70",
+                                    "--snaps", d, "--snap-every", "5"] + backend,
+                                   capture_output=True, text=True, env=env, timeout=600)
+                if tag == "bake":
+                    m = re.search(r"^\[tie\] (?:gles|vulkan): baked (\d+) losers", r.stdout, re.M)
+                    baked = int(m.group(1)) if m else None
+                    if backend and "VULKAN offscreen" not in r.stdout:
+                        return ("skipped",)
+                frames[tag] = {f: open(os.path.join(d, f), "rb").read() for f in os.listdir(d)}
+            ks = sorted(frames["bake"])
+            # a run that wrote nothing must fail AS A RUN, not compare empty sets
+            if len(ks) < 10 or set(ks) != set(frames["rt"]) or set(ks) != set(frames["none"]):
+                return ("frames missing", len(ks))
+            same = sum(frames["bake"][k] == frames["rt"][k] for k in ks)
+            flick = sum(frames["bake"][k] != frames["none"][k] for k in ks)
+            return (baked, same == len(ks), flick > 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     b = subprocess.run(["make", "-s", "play-gles"], cwd=eng, capture_output=True, text=True)
     binp = os.path.join(eng, "build", "omk-play-gles")
-    if b.returncode != 0 or not os.path.exists(binp):
-        return ("skipped",), ("skipped",), "omk-play-gles did not build (SDL absent?)"
-    tmp = tempfile.mkdtemp()
-    try:
-        frames, baked = {}, None
-        for tag, extra in (("bake", {}), ("rt", {"OMK_NO_TIE_BAKE": "1"}),
-                           ("none", {"OMK_NO_TIE": "1"})):
-            d = os.path.join(tmp, tag)
-            os.makedirs(d)
-            env = dict(os.environ, OMK_NO_GPU_PRESENT="1", OMK_TIE_LOG="1", **extra)
-            r = subprocess.run([binp, omkpaths.data_root(), os.path.join(ROOT, "tables"),
-                                "--save", save, "--area", "0", "--stand", "6219,0,-8490,199",
-                                "--hold", "k200*30,k203*30", "--frames", "70",
-                                "--snaps", d, "--snap-every", "5"],
-                               capture_output=True, text=True, env=env, timeout=600)
-            if tag == "bake":
-                m = re.search(r"^\[tie\] gles: baked (\d+) losers", r.stdout, re.M)
-                baked = int(m.group(1)) if m else None
-            frames[tag] = {f: open(os.path.join(d, f), "rb").read() for f in os.listdir(d)}
-        ks = sorted(frames["bake"])
-        # a run that wrote nothing must fail AS A RUN, not compare empty sets
-        if len(ks) < 10 or set(ks) != set(frames["rt"]) or set(ks) != set(frames["none"]):
-            return ("frames missing",), ("frames",), "the viewer wrote %d frames" % len(ks)
-        same = sum(frames["bake"][k] == frames["rt"][k] for k in ks)
-        flick = sum(frames["bake"][k] != frames["none"][k] for k in ks)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-    return (baked, same == len(ks), flick > 0), (248, True, True), \
-        "the losers baked over Anekbah; every sampled frame of a walk past the " \
-        "signs byte-identical to the per-frame tie's; and some different with " \
-        "no tie (%d of %d here)" % (flick, len(ks))
+    gl = walk(binp, [], {"OMK_NO_GPU_PRESENT": "1"}) \
+        if b.returncode == 0 and os.path.exists(binp) else ("skipped",)
+    # THE VULKAN BACKEND, the same bake through `--world-vulkan` (headless);
+    # optional, as Vulkan is (PORTING A1)
+    b = subprocess.run(["make", "-s", "play"], cwd=eng, capture_output=True, text=True)
+    binp = os.path.join(eng, "build", "omk-play")
+    vk = walk(binp, ["--world-vulkan"], {"SDL_VIDEODRIVER": "dummy"}) \
+        if b.returncode == 0 and os.path.exists(binp) else ("skipped",)
+    want = lambda got: ("skipped",) if got == ("skipped",) else (248, True, True)
+    return (gl, vk), (want(gl), want(vk)), \
+        "GLES then VULKAN: the losers baked over Anekbah; every sampled frame of a " \
+        "walk past the signs byte-identical to the per-frame tie's; and some " \
+        "different with no tie"
 
 
 def c_engine_tie_census():

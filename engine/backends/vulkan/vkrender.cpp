@@ -62,6 +62,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -127,6 +128,9 @@ struct ShadowUbo {
             return false;                                                    \
         }                                                                    \
     } while (0)
+
+// how a baked tie loser's corner is marked; `scene.vert` decodes it
+constexpr float kTieLoserPhase = 8192.0f;
 
 // One vertex, matching `scene.vert`'s three inputs. The UVs stay in the
 // material's own PIXEL units, as the shipped data stores them, and the shader
@@ -357,6 +361,25 @@ private:
     // buffer half below.
     std::map<const omk::Geometry*, omk::DepthTie> tie_;
     void resolveTies(const omk::Draw& d);
+    // THE TIE DECIDED ONCE (`bakeDepthTie`, todo/optimization.md step 29): per
+    // geometry, one byte a corner, 1 on a loser's. A baked geometry skips
+    // `resolveTies` and its losers are MARKED in every upload (the phase moved
+    // down by `kTieLoserPhase`), which `scene.vert` draws two 16-bit depth
+    // steps back instead of collapsing them.
+    std::map<const omk::Geometry*, std::vector<std::uint8_t>> baked_;
+    GpuVert vertOf(const omk::Geometry& g, std::size_t i, const std::vector<std::uint8_t>* lose) const {
+        const auto& c = g.corners[i];
+        GpuVert v{c.x, c.y, c.z, c.u, c.v, c.r, c.g, c.b, c.nx, c.ny, c.nz, c.phase};
+        if (lose && i < lose->size() && (*lose)[i]) v.phase -= kTieLoserPhase;
+        return v;
+    }
+    const std::vector<std::uint8_t>* bakedOf(const omk::Geometry* g) const {
+        const auto it = baked_.find(g);
+        return it == baked_.end() ? nullptr : &it->second;
+    }
+public:
+    bool bakeDepthTie(const omk::Geometry* g, std::span<const omk::Draw> order) override;
+private:
 
     Push             push_{};
     // the fog, held between begin() and each submit()
@@ -1836,19 +1859,14 @@ bool VulkanRenderer::uploadGeometry(const omk::Geometry* g) {
             const VkDeviceSize bytes = g->corners.size() * sizeof(GpuVert);
             if (vkMapMemory(dev_, vbo_[g].second, 0, bytes, 0, &p) == VK_SUCCESS) {
                 auto* dst = static_cast<GpuVert*>(p);
+                const auto* lose = bakedOf(g);
                 if (partial) {
                     for (const std::uint32_t i : g->dirtyCorners) {
                         if (i >= g->corners.size()) continue;
-                        const auto& c = g->corners[i];
-                        dst[i] = {c.x, c.y, c.z, c.u, c.v, c.r, c.g, c.b,
-                                  c.nx, c.ny, c.nz, c.phase};
+                        dst[i] = vertOf(*g, i, lose);
                     }
                 } else {
-                    for (std::size_t i = 0; i < g->corners.size(); ++i) {
-                        const auto& c = g->corners[i];
-                        dst[i] = {c.x, c.y, c.z, c.u, c.v, c.r, c.g, c.b,
-                                  c.nx, c.ny, c.nz, c.phase};
-                    }
+                    for (std::size_t i = 0; i < g->corners.size(); ++i) dst[i] = vertOf(*g, i, lose);
                     tie_[g].vboReplaced();
                 }
                 vkUnmapMemory(dev_, vbo_[g].second);
@@ -1863,10 +1881,8 @@ bool VulkanRenderer::uploadGeometry(const omk::Geometry* g) {
         grow = true;                   // it has changed size once: give it room
     }
     std::vector<GpuVert> v(g->corners.size());
-    for (std::size_t i = 0; i < g->corners.size(); ++i) {
-        const auto& c = g->corners[i];
-        v[i] = {c.x, c.y, c.z, c.u, c.v, c.r, c.g, c.b, c.nx, c.ny, c.nz, c.phase};
-    }
+    const auto* lose = bakedOf(g);
+    for (std::size_t i = 0; i < g->corners.size(); ++i) v[i] = vertOf(*g, i, lose);
     const VkDeviceSize bytes = v.size() * sizeof(GpuVert);
     if (!bytes) return false;
     // a first buffer is exact - a set is never re-sized - and one that has
@@ -1889,11 +1905,40 @@ bool VulkanRenderer::uploadGeometry(const omk::Geometry* g) {
     return true;
 }
 
+// The GLES backend's rule, the same `DepthTie` walked once over the set's
+// whole draw order (`glesrender.cpp` has the reading): its losers draw a depth
+// step back rather than degenerated, so a culled winner or a door leaf moved
+// off its frame leaves the loser drawn, as the engine draws it.
+bool VulkanRenderer::bakeDepthTie(const omk::Geometry* g, std::span<const omk::Draw> order) {
+    static const bool off = std::getenv("OMK_NO_TIE") != nullptr;
+    static const bool noBake = std::getenv("OMK_NO_TIE_BAKE") != nullptr;
+    if (off || noBake || !g) return false;
+    omk::DepthTie t;
+    std::vector<std::size_t> losers, restore;
+    for (const omk::Draw& d : order)
+        if (d.geo == g) t.resolve(*g, d.start, d.count, d.blend == omk::Blend::Opaque, losers, restore);
+    std::vector<std::uint8_t> lose(g->corners.size(), 0);
+    std::set<std::size_t> tris(losers.begin(), losers.end());
+    for (const std::size_t tri : tris)
+        for (std::size_t k = 3 * tri; k < 3 * tri + 3 && k < lose.size(); ++k) lose[k] = 1;
+    baked_[g] = std::move(lose);
+    // the buffer holds the old decision - degenerated faces, or none marked:
+    // forget both, so the next upload is whole and marked
+    tie_.erase(g);
+    vboRev_.erase(g);
+    static const bool tieLog = std::getenv("OMK_TIE_LOG") != nullptr;
+    if (tieLog)
+        std::printf("[tie] vulkan: baked %zu losers over %zu draws on geometry %p\n",
+                    tris.size(), order.size(), static_cast<const void*>(g));
+    return true;
+}
+
 void VulkanRenderer::resolveTies(const omk::Draw& d) {
     // `OMK_NO_TIE=1` leaves the fight in, for a before/after.
     static const bool off = std::getenv("OMK_NO_TIE") != nullptr;
     if (off) return;
     const omk::Geometry* g = d.geo;
+    if (baked_.count(g)) return;             // settled once, drawn back (`bakeDepthTie`)
     auto& t = tie_[g];
     std::vector<std::size_t> losers, restore;
     t.resolve(*g, d.start, d.count, d.blend == omk::Blend::Opaque, losers, restore);
@@ -2364,6 +2409,7 @@ void VulkanRenderer::geometryGone(void* self, const omk::Geometry* g) {
     r->vboCap_.erase(g);
     r->vboRev_.erase(g);
     had |= r->tie_.erase(g) > 0;
+    had |= r->baked_.erase(g) > 0;
     if (had) ++r->released_;
 }
 

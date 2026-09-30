@@ -2010,9 +2010,14 @@ byte-identical to the per-frame tie, some frames different without it.
 Shown to fail with the shader's step removed: `(248, False, False)`, the
 baked frames then equal to the no-tie run's.
 
-**Not done**: the Vulkan backend still settles the tie per frame (the same
-`bakeDepthTie` would serve it, with a depth offset in its vertex stage);
-bodies keep the posed tie (resolved once on the rest geometry already); a
+**And the VULKAN backend, the same day** (the reader: *"fix vulkan"*): the
+same bake and mark, `scene.vert` adding the two steps to its 0..1 window
+depth. Over the same 179-frame walk through `--world-vulkan`: 248 baked,
+179 / 179 byte-identical to its per-frame tie, 0 equal to the no-tie run, and
+the per-frame tie's loser reports 12676 -> 897 (the rest are the bodies').
+The check's Vulkan half is shown to fail the same way, `(248, False, False)`.
+
+**Not done**: bodies keep the posed tie (resolved once on the rest geometry already); a
 coincidence CREATED by motion is not baked, as it was not before. **The
 console has not run it**: the Vita build takes the same backend and its
 shader cache re-keys on the changed source, but the tie's console cost and

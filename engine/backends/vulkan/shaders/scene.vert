@@ -37,7 +37,17 @@ void main() {
     vCol = inCol;
     vWorld = inPos;
     vNrm = inNrm;
-    vPhase = inPhase;
+    // A TIE LOSER (`bakeDepthTie`) carries its phase moved down by 8192: -1
+    // becomes -8193, a phase p becomes p - 8192, both decoded exactly here
+    float ph = inPhase;
+    float tie = 0.0;
+    if (ph < -4096.0) { ph += 8192.0; tie = 1.0; }
+    vPhase = ph;
     gl_Position = pc.mvp * vec4(inPos, 1.0);
     vDepth = gl_Position.w;
+    // ...drawn TWO 16-bit depth steps back (Vulkan's window depth IS the NDC
+    // z), so the earlier coincident face keeps every pixel under LESS whatever
+    // the noise between the two triangulations: the band a later face must
+    // beat under the engine's strict test on its quantised buffer (ASSETS 4b)
+    gl_Position.z += tie * (2.0 / 65535.0) * gl_Position.w;
 }

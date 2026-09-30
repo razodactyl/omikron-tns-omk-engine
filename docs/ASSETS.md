@@ -1125,6 +1125,8 @@ frame driving the face, through the same data path the browser app uses:
   16-bit steps BACK, which is the band a later face must beat in the engine;
   byte-identical to the per-frame tie over a walk past the signs, at no
   per-frame cost (`verify.py: engine: gles tie bake`, todo/optimization.md 29).
+  The Vulkan backend takes the same bake, so both GPU backends now settle the
+  set's ties once rather than per frame; bodies keep the per-frame tie.
 
   That is why "material-id order looks right" — it was never an accident of
   numbering. It is the slot order, seen through the one case where the two

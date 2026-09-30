@@ -302,8 +302,8 @@ public:
     // earlier coincident face, and draws those one depth step BACK from then
     // on instead of settling the tie per frame - the frontend calls this again
     // whenever the order can change (a set loaded, a texture base moved).
-    // The software reference has its own tie band and Vulkan settles it per
-    // frame, so both keep the default.
+    // The GLES and Vulkan backends do this; the software reference keeps the
+    // default, because its tie band (`raster.cpp` kDepthTie) is the rule itself.
     virtual bool bakeDepthTie(const Geometry* /*g*/, std::span<const Draw> /*order*/) { return false; }
     // How many lights a posed draw may carry (`Draw::vertexLights`).
     virtual int maxVertexLights() const { return 0; }

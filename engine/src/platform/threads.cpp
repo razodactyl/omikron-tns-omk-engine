@@ -104,6 +104,16 @@ struct Threads::Impl {
     std::size_t from = 0, to = 0, grain = 0;
     const std::function<void(std::size_t, std::size_t)>* body = nullptr;
     int chunks = 0;
+    // THE NEXT CHUNK TO TAKE, claimed by each woken worker. Taking
+    // `slice(w->index)` instead - the chunk of the worker's own SLOT - was
+    // wrong whenever fewer chunks than workers were handed out: the semaphore
+    // wakes ANY waiting worker, so with two workers and two chunks the one
+    // woken could be worker 1, which then ran chunk 1 - the CALLER's own -
+    // while chunk 0 ran nowhere. Two threads posing the same walkers,
+    // reallocating the same vectors: the Bowie sequence's heap corruption on
+    // the console (2026-09-30), exposed once the side-plane cull left one or
+    // two walkers to pose. The `std::thread` pool always took `taken++`.
+    std::atomic<int> taken{0};
     SceUID work = -1;      // signalled once per worker that has a chunk
     SceUID done = -1;      // signalled by each worker when its chunk is done
     bool stop = false;
@@ -139,7 +149,8 @@ int Threads::Impl::workerMain(SceSize, void* argp) {
         sceKernelWaitSema(w->pool->work, 1, nullptr);
         if (w->pool->stop) break;
         std::size_t lo = 0, hi = 0;
-        w->pool->slice(w->index, lo, hi);
+        const int mine = w->pool->taken.fetch_add(1);
+        if (mine < w->pool->chunks - 1) w->pool->slice(mine, lo, hi);
         if (lo < hi) {
             // a chunk that splits work again runs it inline: `parallelFor`
             // recognises this thread as a worker (`isWorker`)
@@ -200,6 +211,7 @@ void Threads::parallelFor(std::size_t begin, std::size_t end, std::size_t grain,
     if (chunks == 1) { body(begin, end); return; }
     impl_->from = begin; impl_->to = end; impl_->grain = grain;
     impl_->body = &body; impl_->chunks = chunks;
+    impl_->taken.store(0);                        // before any worker is woken
     for (int i = 0; i < chunks - 1; ++i) sceKernelSignalSema(impl_->work, 1);
     std::size_t lo = 0, hi = 0;
     impl_->slice(chunks - 1, lo, hi);             // the caller takes the last chunk

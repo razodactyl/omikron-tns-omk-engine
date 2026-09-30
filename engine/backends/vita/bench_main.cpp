@@ -58,6 +58,7 @@
 #include "platform/datafs.h"
 #include "platform/threads.h"
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
@@ -316,6 +317,28 @@ int main(int argc, char** argv) {
         static_cast<unsigned long long>(hInline),
         static_cast<unsigned long long>(hThreads),
         hInline == hThreads ? "EXACT" : "DIFFERENT");
+    // THE POOL'S TILING at the job counts a culled street hands it: one or
+    // two walkers. Every item must be visited EXACTLY ONCE per call. The first
+    // Vita pool took the chunk of the worker's own slot, so with fewer chunks
+    // than workers a woken worker 1 ran the caller's chunk twice over and
+    // chunk 0 not at all - the Bowie sequence's heap corruption (2026-09-30).
+    {
+        long badCalls = 0, calls = 0;
+        for (std::size_t n = 1; n <= 6; ++n)
+            for (int r = 0; r < 500; ++r) {
+                std::atomic<int> visits[6];
+                for (auto& v : visits) v.store(0);
+                pool.parallelFor(0, n, 1, [&](std::size_t a, std::size_t z) {
+                    for (std::size_t i = a; i < z; ++i) visits[i].fetch_add(1);
+                });
+                bool ok = true;
+                for (std::size_t i = 0; i < n; ++i) ok = ok && visits[i].load() == 1;
+                ++calls;
+                if (!ok) ++badCalls;
+            }
+        say("pool tiling  %ld calls of 1..6 items, %ld with an item missed or repeated  "
+            "tiling: %s\n", calls, badCalls, badCalls ? "BROKEN" : "EXACT");
+    }
     // The number the decision wanted, in the form the handoff frames it: the
     // M1 spent 6.0 ms on the whole frame, of which these stages were ~1.34.
     say("budget   these stages alone are %.1f%% of a 33.3 ms frame\n",

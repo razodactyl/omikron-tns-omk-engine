@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
     long ticks = 0;
     double voiced = 0.0;
     std::size_t at = 0;
-    int lines = 0, menus = 0;
+    int lines = 0, menus = 0, ahead = 0;
     for (int guard = 0; guard < 200; ++guard) {
         if (p.phase() == omk::DialogPhase::Finished) break;
         if (p.lineChanged()) {
@@ -67,6 +67,21 @@ int main(int argc, char** argv) {
               << (ca ? static_cast<long>(ca->eye[0]) : -9999) << ' '
               << (ca ? static_cast<long>(ca->roll) : -9999) << ' '
               << (ca && ca->absolute() ? 1 : 0) << '\n';
+            // WHAT the line is, whichever thread read and decoded it: the
+            // FNV-1a of its samples and of its file (`prefetch_` decodes the
+            // next lines ahead; `OMK_NO_LINE_AHEAD=1` does none of it)
+            const auto fnv = [](const unsigned char* b, std::size_t n) {
+                std::uint32_t h = 2166136261u;
+                for (std::size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 16777619u;
+                return h;
+            };
+            f << "pcm " << p.pcm().size() << ' '
+              << fnv(reinterpret_cast<const unsigned char*>(p.pcm().data()),
+                     p.pcm().size() * sizeof(std::int16_t)) << ' '
+              << p.morph().size() << ' '
+              << fnv(reinterpret_cast<const unsigned char*>(p.morph().data()), p.morph().size())
+              << '\n';
+            ahead += p.loadPrefetched() ? 1 : 0;
         }
         // Let the voice run out and then keep running for a full minute -
         // longer than any line in the game. If anything advanced on its own,
@@ -97,6 +112,7 @@ int main(int argc, char** argv) {
     f << "end " << lines << ' ' << menus << ' '
       << static_cast<long>(voiced * 100) << ' '
       << (p.phase() == omk::DialogPhase::Finished ? 1 : 0) << '\n';
+    std::printf("%d of %d lines read and decoded ahead\n", ahead, lines);
     std::printf("%d lines, %d menus, %.1f s of voice, %s after %zu presses\n",
                 lines, menus, voiced,
                 p.phase() == omk::DialogPhase::Finished ? "finished" : "STILL OPEN",

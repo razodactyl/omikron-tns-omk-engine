@@ -7,6 +7,7 @@
 #include "platform/datafs.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <algorithm>
 #include <set>
 
@@ -205,32 +206,33 @@ bool DialogPlayer::enter(int node) {
         const std::string path = morphDir_ + "/" + voice_ + ".3DM";
         const auto ahead = prefetch_.find(path);
         loadPrefetched_ = ahead != prefetch_.end();
+        loadMs_[0] = loadMs_[1] = loadMs_[2] = 0.0;
+        LineAhead here;
+        LineAhead* l = &here;
+        std::shared_ptr<LineAhead> held;
         if (loadPrefetched_) {
-            morph_ = ahead->second->take();
+            // read and decoded while the line before it played: the frame pays
+            // the wait for whatever is left of that, and nothing else
+            held = ahead->second;
             prefetch_.erase(ahead);          // taken: a later visit reads again
+            if (held->job) held->job->wait();
+            l = held.get();
+            loadMs_[0] = std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - t0).count();
+            loadMs_[2] = l->ms[0] + l->ms[1];
         } else {
-            morph_ = DataFs::readPath(path);
+            here.path = path;
+            loadLine(here);
+            loadMs_[0] = here.ms[0];
+            loadMs_[1] = here.ms[1];
         }
-        const auto t1 = std::chrono::steady_clock::now();
-        loadMs_[0] = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        loadMs_[1] = 0.0;
-        const auto& d = morph_;
-        if (!d.empty()) {
-            const auto L = morphLayout(d);
-            const auto raw = morphAudio(d, L);
-            if (!raw.empty()) {
-                // OTNS ADPCM at 22050 - the decoder `verify.py: morph audio`
-                // checks sample-identical over all 777 files.
-                pcm_ = adpcmDecode(raw, L.channels > 1, AdpcmTables::builtin());
-                loadMs_[1] = std::chrono::duration<double, std::milli>(
-                                 std::chrono::steady_clock::now() - t1).count();
-                channels_ = L.channels > 1 ? 2 : 1;
-                if (!pcm_.empty()) {
-                    lineLen_ = static_cast<double>(pcm_.size()) /
-                               static_cast<double>(channels_) / 22050.0;
-                    ++voiced_;
-                }
-            }
+        morph_ = std::move(l->morph);
+        pcm_ = std::move(l->pcm);
+        channels_ = l->channels;
+        if (!pcm_.empty()) {
+            lineLen_ = static_cast<double>(pcm_.size()) /
+                       static_cast<double>(channels_) / 22050.0;
+            ++voiced_;
         }
     }
     prefetchSuccessors(node);
@@ -239,9 +241,36 @@ bool DialogPlayer::enter(int node) {
     return true;
 }
 
+// One line's `.3DM` read and its voice decoded - a function of the file and
+// of nothing else, so it may run on any thread (`prefetchSuccessors`).
+void DialogPlayer::loadLine(LineAhead& l) {
+    const auto t0 = std::chrono::steady_clock::now();
+    l.morph = DataFs::readPath(l.path);
+    const auto t1 = std::chrono::steady_clock::now();
+    l.ms[0] = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    l.ms[1] = 0.0;
+    l.channels = 1;
+    const auto& d = l.morph;
+    if (d.empty()) return;
+    const auto L = morphLayout(d);
+    const auto raw = morphAudio(d, L);
+    if (raw.empty()) return;
+    // OTNS ADPCM at 22050 - the decoder `verify.py: morph audio` checks
+    // sample-identical over all 777 files.
+    l.pcm = adpcmDecode(raw, L.channels > 1, AdpcmTables::builtin());
+    l.ms[1] = std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - t1).count();
+    l.channels = L.channels > 1 ? 2 : 1;
+}
+
 void DialogPlayer::prefetchSuccessors(int node) {
+    // nothing ahead without a thread to do it on (it would be done HERE, on
+    // the line's first frame, for every branch), or under `OMK_NO_LINE_AHEAD`,
+    // which is the comparison
+    static const bool off = !OMK_THREADS || std::getenv("OMK_NO_LINE_AHEAD") != nullptr;
+    if (off) { prefetch_.clear(); return; }
     const DialogNode& n = conv_.nodes[static_cast<std::size_t>(node)];
-    std::map<std::string, std::unique_ptr<FileFetch>> keep;
+    std::map<std::string, std::shared_ptr<LineAhead>> keep;
     for (int k = 0; k < 4; ++k) {
         const int t = n.param[k];
         if (t < 0 || t >= static_cast<int>(conv_.nodes.size())) continue;
@@ -251,8 +280,12 @@ void DialogPlayer::prefetchSuccessors(int node) {
         if (keep.count(path)) continue;
         if (const auto it = prefetch_.find(path); it != prefetch_.end())
             keep[path] = std::move(it->second);
-        else
-            keep[path] = std::make_unique<FileFetch>(path);
+        else {
+            auto l = std::make_shared<LineAhead>();
+            l->path = path;
+            l->job = std::make_unique<BackgroundJob>([l] { loadLine(*l); });
+            keep[path] = std::move(l);
+        }
     }
     prefetch_ = std::move(keep);
 }

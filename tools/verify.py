@@ -14149,6 +14149,59 @@ def c_engine_tie_equivalence():
         "the revisions were answered (replayed, walked, replays abandoned)"
 
 
+def c_engine_line_ahead():
+    r"""A line decoded AHEAD is the line decoded at its start
+    (`todo/optimization.md` step 32; `script/dialogue.h`).
+
+    The original never decodes a line where it starts: `Morph_Open` walks the
+    file and `sub_42D960`, on the timer thread, decodes its ADPCM a piece at a
+    time into the sound buffer while the line plays. The port decodes a whole
+    voice before its first frame, so `DialogPlayer` does it for every branch
+    target of the line that is PLAYING, on a thread of its own
+    (`BackgroundJob`), and a line that was prepared that way costs its start
+    only the hand-over.
+
+    `play_dialog` writes, per line, the FNV-1a of its samples and of its file.
+    Conversation 387 walked through four replies, with the read-ahead and with
+    `OMK_NO_LINE_AHEAD=1`: the two files must be the same bytes, and the first
+    run must actually have taken lines from the thread (4 of 5 - the first
+    line of a conversation is the script's choice and is read where it starts).
+    Shown to fail by not waiting for the job before taking its line: the
+    samples are then moved out from under a decode that has not finished, and
+    every line read ahead differs.
+    """
+    import subprocess, tempfile, shutil
+    eng = os.path.join(ROOT, "engine")
+    if not os.path.isdir(eng):
+        return ("skipped",), ("skipped",), "engine/ absent"
+    b = subprocess.run(["make", "-s", "build/play_dialog"], cwd=eng, capture_output=True, text=True)
+    binp = os.path.join(eng, "build", "play_dialog")
+    if b.returncode != 0 or not os.path.exists(binp):
+        return ("build failed",), ("built",), "play_dialog must build"
+    ops = os.path.join(ROOT, "tables", "vm_opcodes.json")
+    tmp = tempfile.mkdtemp()
+    try:
+        got = []
+        for k, extra in enumerate(({}, {"OMK_NO_LINE_AHEAD": "1"})):
+            out = os.path.join(tmp, "d%d.txt" % k)
+            r = subprocess.run([binp, omkpaths.data_root(), ops, "387", out, "n0n1n0n2nnnn"],
+                               capture_output=True, text=True, env=dict(os.environ, **extra))
+            m = re.search(r"(\d+) of (\d+) lines read and decoded ahead", r.stdout)
+            rows = [ln.split() for ln in open(out)] if os.path.exists(out) else []
+            pcm = [tuple(f[1:]) for f in rows if f and f[0] == "pcm"]
+            got.append(((int(m.group(1)), int(m.group(2))) if m else None, pcm))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    (aheadOn, pcmOn), (aheadOff, pcmOff) = got
+    voiced = sum(1 for p in pcmOn if int(p[0]) > 0)
+    return (aheadOn, aheadOff, len(pcmOn), voiced, pcmOn == pcmOff), \
+           ((4, 5), (0, 5), 5, 5, True), \
+           "conversation 387 through four replies: lines taken from the " \
+           "read-ahead thread with it on and with OMK_NO_LINE_AHEAD=1; the " \
+           "lines, how many carry a voice, and whether every line's samples " \
+           "and file hash the same both ways"
+
+
 def c_engine_threaded_bodies():
     r"""The crowd posed over several cores is the SAME FRAME, byte for byte
     (`todo/vita-port.md` P4; `platform/threads.h`).
@@ -39240,6 +39293,7 @@ SLOW = [
     ("engine: tie equivalence", c_engine_tie_equivalence, "todo/optimization.md 3; o3de/depthtie.h"),
     ("engine: body tie", c_engine_body_tie, "todo/vita-port.md 2026-09-22; o3de/geom3do.h tieClass"),
     ("engine: threaded bodies", c_engine_threaded_bodies, "todo/vita-port.md P4; platform/threads.h"),
+    ("engine: line ahead", c_engine_line_ahead, "todo/optimization.md step 32; script/dialogue.h"),
     ("engine: pixel tables", c_engine_pixel_tables, "todo/optimization.md 4; ui/surface.h"),
     ("engine: music storage", c_engine_music_storage, "todo/optimization.md 5; audio/music.h"),
     ("engine: adpcm table", c_engine_adpcm_table, "todo/optimization.md 16; formats/adpcm.h"),

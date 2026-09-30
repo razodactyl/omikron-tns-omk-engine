@@ -294,9 +294,12 @@ public:
     // decode - a console's wait on a line (2026-09-23) is apportioned by these
     double loadReadMs() const { return loadMs_[0]; }
     double loadDecodeMs() const { return loadMs_[1]; }
-    // whether this line's `.3DM` had been read AHEAD, while the line before
-    // it played (`prefetch_`)
+    // whether this line's `.3DM` had been read - and its voice decoded - AHEAD,
+    // while the line before it played (`prefetch_`). The two costs above are
+    // then what the FRAME paid (the wait for the job, and nothing); what the
+    // job itself paid is `loadAheadMs`.
     bool loadPrefetched() const { return loadPrefetched_; }
+    double loadAheadMs() const { return loadMs_[2]; }
     // how many of the next lines are being read ahead now
     std::size_t aheadCount() const { return prefetch_.size(); }
     int    channels() const { return channels_; }
@@ -347,13 +350,31 @@ private:
     std::vector<DialogReply>  replies_;
     std::vector<std::int16_t> pcm_;
     std::vector<std::byte> morph_;
-    double loadMs_[2] = {0.0, 0.0};
+    double loadMs_[3] = {0.0, 0.0, 0.0};
     bool loadPrefetched_ = false;
     // THE LINES THAT CAN COME NEXT, READ AHEAD (2026-09-23): the `.3DM` of
     // every branch target of the line playing, keyed by path. Which one is
     // taken is the player's choice, so all of them are read; the rest are
     // dropped - without waiting - when the next line starts.
-    std::map<std::string, std::unique_ptr<FileFetch>> prefetch_;
+    //
+    // ...AND DECODED AHEAD (2026-09-30, todo/optimization.md step 32). The
+    // original never decodes a line at its start: `Morph_Open` walks the file
+    // and `sub_42D960`, on the timer thread, decodes the ADPCM a piece at a
+    // time into the sound buffer as the line plays. Here the whole voice is
+    // decoded before the line starts - so that, too, is done on the reading
+    // thread, and a line that was read ahead costs its start nothing but the
+    // hand-over. What a line IS does not change: the same bytes through the
+    // same decoder.
+    struct LineAhead {
+        std::string path;
+        std::vector<std::byte> morph;
+        std::vector<std::int16_t> pcm;
+        int channels = 1;
+        double ms[2] = {0.0, 0.0};          // read, decode
+        std::unique_ptr<BackgroundJob> job;
+    };
+    static void loadLine(LineAhead& l);
+    std::map<std::string, std::shared_ptr<LineAhead>> prefetch_;
     void prefetchSuccessors(int node);
 };
 

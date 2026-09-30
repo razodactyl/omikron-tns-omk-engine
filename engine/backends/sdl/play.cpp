@@ -10971,12 +10971,16 @@ int main(int argc, char** argv) {
                 // decode, then this frontend's face tracks, resample, hand-over
                 std::printf("line load: %s - read %.0f ms (%zu KB%s), voice decode %.0f ms, "
                             "face tracks %.0f ms, resample %.0f ms, into the mixer %.0f ms; "
-                            "%.0f ms here in all; %zu next line(s) reading ahead\n",
+                            "%.0f ms here in all; %zu next line(s) reading ahead",
                             dlg.voice().empty() ? "no voice" : dlg.voice().c_str(),
                             dlg.loadReadMs(), dlg.morph().size() / 1024,
-                            dlg.loadPrefetched() ? ", read AHEAD" : "", dlg.loadDecodeMs(),
+                            dlg.loadPrefetched() ? ", read and decoded AHEAD" : "",
+                            dlg.loadDecodeMs(),
                             tracksMs, resampleMs, lineMs(ps0), lineMs(lineT0),
                             dlg.aheadCount());
+                if (dlg.loadPrefetched())
+                    std::printf("; its own thread spent %.0f ms on it", dlg.loadAheadMs());
+                std::printf("\n");
                 replySel = 0; menuShown = false; lineScroll = 0;
             }
             if (dlg.phase() == omk::DialogPhase::Menu && !menuShown) {

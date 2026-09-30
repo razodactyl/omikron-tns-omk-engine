@@ -188,6 +188,12 @@ Vita for a while, so the next work should be provable on the Mac.
   `OMK_SYNC_SETS=1` is the old way. In the next console log read `set load:`
   (its `the frame waited W ms`) and `world: rebuild -`.
 
+* **step 32 - a line's voice decoded on the read-ahead thread**: the lines
+  that can come next were already READ while a line played; they are now
+  decoded there too, so a line's start is the hand-over. The first line of a
+  conversation still loads on its frame. In the next console log read `line
+  load:` - `read and decoded AHEAD`, and the `ms here in all`.
+
 **The reader's rule for this work (2026-09-30)**: the original is faster than
 the port, so **read the original's function for each task first** and take
 what it does - it found the mirror's two passes, the crowd LOD, the camera
@@ -196,8 +202,7 @@ clock, and in step 30 that neither the player nor the sky is rewritten.
 **Next, in order**: what is left of an area change AFTER the set - the world
 rebuild, the texture uploads, the tie bake and the Session's cases 2..9 (the
 `.SCX`, the models), which the original does in one tick too, so there is no
-mechanism of its to take and the console log has to size them first; the voice
-line start (decode off the main thread), the start menu's whole-surface
+mechanism of its to take and the console log has to size them first; the start menu's whole-surface
 upload, shared sound samples. Anekbah's moving-mesh grid + patch (~12 ms, 70x
 the Mac, unexplained) waits for a console profile - and row d's fix (a moving
 set mesh drawn from rest with one matrix, as `o3de_SetNodePos` does) is now

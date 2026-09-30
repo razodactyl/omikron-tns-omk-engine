@@ -2135,6 +2135,43 @@ the stall that is left; what then remains on the arrival frames is the rebuild
 the tie bake and the Session's cases 2..9 (`model load:` lines) - the part the
 original does not spread either. Not run on a console.
 
+### 32. A line's voice decoded on the read-ahead thread (2026-09-30, M3)
+
+Row g of step 28: a line's start was 133-295 ms on the console (345 the
+first). The 22050 device (step 28 g/i/m) removed the resample; what was left
+on the frame a line starts was the ADPCM decode of the WHOLE voice, and the
+read when the line had not been read ahead.
+
+**The original** (row g's read: `Morph_Open` 0x0042C300, `sub_42D960`) never
+decodes a line where it starts - the file is walked, and the timer thread
+decodes the ADPCM a piece at a time into the sound buffer while the line
+plays. The port's mixer takes a whole sample, so the nearest thing it can take
+over is WHERE the decode runs: `DialogPlayer` already read the `.3DM` of every
+branch target of the playing line on a thread (`FileFetch`, 2026-09-23); that
+thread now decodes the voice too (`DialogPlayer::loadLine` in a
+`BackgroundJob`), and the line's start takes the bytes and the samples as they
+are. With no threads (`OMK_THREADS 0`) nothing is prepared ahead at all - it
+used to be read on the line's first frame for every branch.
+`OMK_NO_LINE_AHEAD=1` is the comparison.
+
+* **The same line**: `play_dialog` now writes the FNV-1a of each line's
+  samples and file. Conversations 272, 387, 401 and 402, ahead against not:
+  the same bytes; 2 of 3 and 4 of 5 lines came from the thread (a
+  conversation's FIRST line is the script's choice and is read where it
+  starts - 401 and 402 are one line each). `verify.py: engine: line ahead`,
+  shown to fail by not waiting for the job.
+* **In the viewer** (`--call 387`, software): `line load:` now says `read and
+  decoded AHEAD ... its own thread spent N ms on it`, and the frame's share of
+  such a line is 0 ms on the M3 (it was the 1-2 ms decode). The frame outside
+  the talker's picture is identical; that picture differs run to run with no
+  change at all (9904 pixels between two identical runs), so a dump cannot
+  judge this step and the hashes do.
+* **Left**: the first line of a conversation still reads and decodes on its
+  frame; the face tracks (`nodeTracks`) and the 3.4 MB copy into
+  `speakerMorph` stay on the frame (0 ms on the M3, unmeasured on a console);
+  streaming the decode as the original does would cover the first line too and
+  needs a mixer voice that pulls. Not run on a console.
+
 ## What is NOT in scope
 
 * The software renderer's speed. It is the reference and a comparison tool;

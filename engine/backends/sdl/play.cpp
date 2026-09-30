@@ -4186,8 +4186,15 @@ int main(int argc, char** argv) {
         omk::Geometry posed;       // ...that, placed in the world this frame
         int   lodRoot = -1;
         float origin[3] = {0, 0, 0};
+        float radius = 0.0f;       // about `origin`, over `atRest`'s corners - the view cull's
         bool  built = false;
         bool  drawn = false;
+        // PLACED BY THE RENDERER where it poses bodies: `atRest` as it is, one
+        // affine a mesh (all the same - a vehicle is rigid) - the original's
+        // node matrix (`o3de_SetNodePos` and the facing) instead of every
+        // corner rewritten and re-sent each frame (2026-09-30)
+        bool  gpu = false;
+        std::vector<float> affine;
     };
     std::vector<std::unique_ptr<VehStaged>> vehStaged;
     int vehDrawn = 0, vehLive = 0, vehStopped = 0;
@@ -16849,6 +16856,7 @@ int main(int argc, char** argv) {
                 static const int pedLodMax = std::getenv("OMK_PED_LOD_MAX") ? std::atoi(std::getenv("OMK_PED_LOD_MAX")) : 3;
                 pedFootOffMax = 0.0f;
                 pedJobs.clear();
+                const double pedSerial0 = phaseNow();
                 for (std::size_t i = 0; i < ws.size(); ++i) {
                     const auto& w = ws[i];
                     PedStaged& p = *pedStaged[i];
@@ -16933,6 +16941,7 @@ int main(int argc, char** argv) {
                     job.frame = frame;
                     pedJobs.push_back(job);
                 }
+                phSpan["ped serial"] += phaseNow() - pedSerial0;
                 // ---- THE BODIES, which may run on several cores -----------
                 //
                 // The pass above is the SERIAL half and it is serial for a
@@ -17168,6 +17177,7 @@ int main(int argc, char** argv) {
                 // where the crowd's are 10/20/30/40, so a slider is still
                 // drawn a good way past the last walker.
                 const float vreach = omk::kVehLodDistances[3];
+                const double veh0 = phaseNow();
                 for (std::size_t i = 0; i < vs.size(); ++i) {
                     const auto& v = vs[i];
                     VehStaged& sv = *vehStaged[i];
@@ -17231,7 +17241,19 @@ int main(int argc, char** argv) {
                         if (sv.lodRoot >= 0 && static_cast<std::size_t>(sv.lodRoot) < sv.mo->meshes.size())
                             for (int k = 0; k < 3; ++k)
                                 sv.origin[k] = sv.mo->meshes[static_cast<std::size_t>(sv.lodRoot)].pos[k];
+                        sv.radius = 0.0f;
+                        for (const auto& c : sv.atRest.corners) {
+                            const float dx = c.x - sv.origin[0], dy = c.y - sv.origin[1], dz = c.z - sv.origin[2];
+                            sv.radius = std::max(sv.radius, std::sqrt(dx * dx + dy * dy + dz * dz));
+                        }
                         sv.built = true;
+                    }
+                    // OUTSIDE THE VIEW: `sub_48D7F0` rejects the instance whole
+                    // before any matrix or vertex; the radius here is the
+                    // composed model's own, never smaller than the node's
+                    {
+                        const float at[3] = {m.body[0], m.body[1] - omk::kVehNodeLift, m.body[2]};
+                        if (!mine && outsideView(at, sv.radius, true)) continue;
                     }
                     // ...unless this is the slider he is CLIMBING INTO, in
                     // which case its door is posed from the clip at the
@@ -17287,13 +17309,31 @@ int main(int argc, char** argv) {
                             doorPosed = true;
                         }
                     }
-                    if (!doorPosed) sv.posed = sv.atRest;
                     // `sub_437F80(inst, x, y - 30.75, z)`: the instance sits
                     // 30.75 units ABOVE the body point (y is down), turned to
                     // the heading `sub_453330` built from the direction to its
                     // mover - which for a vehicle is where it is going.
                     float vcs, vsn;
                     omk::yawSinCos(m.facing, vcs, vsn);   // once a vehicle, not a corner
+                    sv.gpu = !doorPosed && !cpuBodiesFlag && world.posesBodies() &&
+                             sv.atRest.cornerMesh.size() == sv.atRest.corners.size();
+                    if (sv.gpu) {
+                        // x' = R (x - origin) + body - lift, R the yaw as
+                        // `rotateYawCS` applies it: x' = c x - s z, z' = s x + c z
+                        const float tx = m.body[0] - (vcs * sv.origin[0] - vsn * sv.origin[2]);
+                        const float ty = m.body[1] - omk::kVehNodeLift - sv.origin[1];
+                        const float tz = m.body[2] - (vsn * sv.origin[0] + vcs * sv.origin[2]);
+                        const float a[12] = {vcs, 0.0f, -vsn, tx,
+                                             0.0f, 1.0f, 0.0f, ty,
+                                             vsn, 0.0f, vcs, tz};
+                        sv.affine.resize(12 * sv.mo->meshes.size());
+                        for (std::size_t k = 0; k < sv.mo->meshes.size(); ++k)
+                            std::memcpy(&sv.affine[12 * k], a, sizeof a);
+                        sv.drawn = true;
+                        ++vehDrawn;
+                        continue;
+                    }
+                    if (!doorPosed) sv.posed = sv.atRest;
                     for (auto& c : sv.posed.corners) {
                         const float in[3] = {c.x - sv.origin[0], c.y - sv.origin[1], c.z - sv.origin[2]};
                         float r[3];
@@ -17306,6 +17346,7 @@ int main(int argc, char** argv) {
                     sv.drawn = true;
                     ++vehDrawn;
                 }
+                phSpan["vehicles"] += phaseNow() - veh0;
                 if (vehLive && (vehTold < 0 || n - vehTold >= 300)) {
                     vehTold = n;
                     int brakes = 0, bumps = 0;
@@ -17324,6 +17365,8 @@ int main(int argc, char** argv) {
                                 brakes, bumps, double(closest));
                 }
             }
+            const double player0 = phaseNow();
+            bool playerOffView = false;    // his corners not built, his body not drawn
             if (drawPlayer || drawArm) {
                 // THE PLAYER, posed by his channel's clip - the quaternions
                 // alone, since the root motion is the position the walker
@@ -17345,7 +17388,27 @@ int main(int argc, char** argv) {
                                                   player->state() == omk::ActorState::Shoot,
                                     *pt, player->poseFrame())
                     : omk::composePose(playerMeshes, omk::NodeTracks{}, 0, false);
-                omk::applyPose(playerPosed, playerRest, playerMeshes, pose);
+                // OUTSIDE THE VIEW, as any actor: `sub_48D3B0` skips a node
+                // outside the four side planes before its matrices or its
+                // vertices, and the Bowie sequence flies the camera round the
+                // city while he stands still at his arrival point. Only his
+                // CORNERS and his draw are skipped - the pose, the head, the
+                // bones and the shadow bones below come from `pose` - and only
+                // while nothing this frame reads the corners: the feet latch,
+                // a clip with variants, melee's fist, shoot mode's arm, and
+                // the two enhancements that bound or light him by them. The
+                // sphere is generous: 150 units about a point 35 up his body.
+                {
+                    const float* p0 = player->pos();
+                    const float centre[3] = {p0[0], p0[1] - 35.0f, p0[2]};
+                    const bool standingNow = player->clipName() == "H_STAND";
+                    playerOffView = playerFeetKnown && !(standingNow && !playerStandLatched) &&
+                                    player->variantCount() <= 1 && !omk::envSet("OMK_PLY") &&
+                                    !fightRun.active && !session.shootMode().active() && !drawArm &&
+                                    lighting == 0 && !(drawShadows && shadowQuality >= 2) &&
+                                    outsideView(centre, 150.0f, true);
+                }
+                if (!playerOffView) omk::applyPose(playerPosed, playerRest, playerMeshes, pose);
                 // THE ANCHOR IS THE FLOOR, NOT THE HIPS (omk-play 69).
                 //
                 // `playerFeet` used to be latched from the FIRST pose - the
@@ -17658,7 +17721,7 @@ int main(int argc, char** argv) {
                 // ahead of the character". The actor's own origin is the
                 // pelvis (`player.h`, settled with the camera lift), so that
                 // is what must stay put.
-                for (auto& c : playerPosed.corners) {
+                if (!playerOffView) for (auto& c : playerPosed.corners) {
                     const float in[3] = {c.x - playerRootXZ[0], c.y,
                                          c.z - playerRootXZ[1]};
                     float r[3];
@@ -17667,7 +17730,18 @@ int main(int argc, char** argv) {
                     c.y = r[1] + pp[1] - playerFeet + rootDrop;
                     c.z = r[2] + pp[2];
                 }
-                if (const int hd = omk::headMeshOf(playerMeshes);
+                // the head mesh, looked up again only when the player's model
+                // changes (`player.become`) - it was an O(n^2) walk and a string
+                // a mesh, every frame
+                static const void* headFor = nullptr;
+                static std::size_t headForN = 0;
+                static int headCached = -1;
+                if (headFor != playerMeshes.data() || headForN != playerMeshes.size()) {
+                    headFor = playerMeshes.data();
+                    headForN = playerMeshes.size();
+                    headCached = omk::headMeshOf(playerMeshes);
+                }
+                if (const int hd = headCached;
                     hd >= 0 && static_cast<std::size_t>(hd) < pose.size()) {
                     const float in[3] = {pose[static_cast<std::size_t>(hd)].pos[0] - playerRootXZ[0],
                                          pose[static_cast<std::size_t>(hd)].pos[1],
@@ -17705,7 +17779,7 @@ int main(int argc, char** argv) {
                 }
                 playerMeshAtKnown = true;
                 lastRootDrop = rootDrop;
-                playerPosed.revision = ++worldGeoRev;
+                if (!playerOffView) playerPosed.revision = ++worldGeoRev;
                 for (int k = 0; k < 3; ++k) actorAt[k] = pp[k];
                 actorAt[1] -= playerFeet;
                 actorKnown = true;
@@ -18060,6 +18134,7 @@ int main(int argc, char** argv) {
                     session.currentArea(), session.scene().file().c_str());
                 frameNote = buf;
             }
+            phSpan["player"] += phaseNow() - player0;
             mark("pedestrians, traffic");
             // ---- THE LIGHTS, per pixel (`todo/enhancements.md` 7) -------
             //
@@ -18516,13 +18591,24 @@ int main(int argc, char** argv) {
             for (const auto& up : vehStaged) {
                 if (!up->drawn || !up->mo) continue;
                 const int base = static_cast<int>(up->mo->texBase);
+                if (up->gpu) {
+                    for (const auto& b : up->atRest.batches) {
+                        draws.push_back({keyOf(b.blend, b.cutout,
+                                               static_cast<std::uint32_t>(b.material + base)),
+                                         &up->atRest, b.start, b.count, b.blend, b.cutout,
+                                         litCrowd, castShadows});
+                        draws.back().meshPose = up->affine.data();
+                        draws.back().meshPoses = up->mo->meshes.size();
+                    }
+                    continue;
+                }
                 for (const auto& b : up->posed.batches)
                     draws.push_back({keyOf(b.blend, b.cutout,
                                            static_cast<std::uint32_t>(b.material + base)),
                                      &up->posed, b.start, b.count, b.blend, b.cutout,
                                      litCrowd, castShadows});
             }
-            if (drawPlayer)
+            if (drawPlayer && !playerOffView)
                 for (const auto& b : playerPosed.batches)
                     draws.push_back({keyOf(b.blend, b.cutout, static_cast<std::uint32_t>(
                                                b.material + static_cast<int>(playerTexBase))),

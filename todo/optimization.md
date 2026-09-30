@@ -1896,6 +1896,39 @@ garbage collector freeing the fifteen buffers a frame the whole uploads
 queued, which the ring removes. The next log splits them: `grid moving (floor)`
 / `(steep)`, `motion corners` / `motion soups`.
 
+**"pedestrians, traffic", read against the original - 2026-09-30.** The
+console's section was 9.5-15.6 ms while its named walker spans came to under
+2 ms, because the section also holds the VEHICLES and the PLAYER - the two
+geometries OMK_UPLOAD_LOG saw re-sent whole every frame (~1530 corners at
+several addresses, and 1626). What each does, against the original:
+
+- **Vehicles.** The port copied the composed model (`sv.posed = sv.atRest`,
+  every 48-byte corner and its per-corner arrays), yawed and moved every
+  corner on the CPU and re-sent the buffer, for each of ~10 vehicles in reach,
+  every frame, whether or not the camera saw them. The original treats a
+  vehicle as an INSTANCE: `o3de_SetNodePos` and the facing set its node
+  matrix, `sub_48D7F0` rejects it whole outside the view, and the matrix is
+  applied in the draw. Ported as that: the view cull on a radius measured from
+  the composed model (never smaller than the node's), and on a backend that
+  poses bodies the static `atRest` drawn with one affine per mesh - the
+  renderer applies the node matrix, nothing is rewritten or re-sent. The door
+  animation of a boarding and the non-posing backends keep the CPU path. The
+  GPU-placed vehicles match the CPU ones to 6-18 pixels of rounding (as the
+  walkers do).
+- **The player.** Kay'l's 1626 corners were posed, placed and re-sent every
+  frame; the original draws him as any actor, and `sub_48D3B0` skips an actor
+  outside the view before its matrices. Ported: while he is outside the view
+  and nothing this frame reads his corners (the feet latch, a variant clip,
+  melee's fist, shoot mode's arm, per-pixel light, mapped shadows), his
+  corners and his draw are skipped - his pose, head, bones and shadow bones
+  still come from the pose. Byte-identical with the cull off on the street and
+  the Bowie sequence. His head mesh is also cached per model (an O(n^2) walk
+  with a string per mesh, every frame).
+- **The ring counted a frame per PRESENT**; fades and overlays present twice,
+  so nothing streamed there and a third was reused after one frame. Now one
+  count per frame (the first `begin` after a present).
+- The console log will split the section: `ped serial`, `vehicles`, `player`.
+
 **Correction, 2026-09-30 - the upload counter overstated.** GLES booked a
 PARTIAL upload at the whole geometry's size, so the set's 69-run motion patch
 read as 5 MB every frame; row (a)'s "53 uploads, 7.1 MB, 34 ms" and its split

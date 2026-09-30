@@ -615,7 +615,12 @@ private:
     GLuint ring_ = 0;
     int ringRegion_ = 0;
     std::size_t ringUsed_ = 0;
-    unsigned long presentSeq_ = 1, rotatedAt_ = 0;
+    // ONE COUNT A FRAME: the first `begin` after a present. Counting presents
+    // themselves (the first version) took two a frame wherever a fade or an
+    // overlay presents twice - no geometry then looked "sent last frame", so
+    // nothing streamed, and the ring's thirds rotated twice a frame, reused
+    // after one frame instead of two (the console, 2026-09-30).
+    unsigned long presentSeq_ = 1, frameSeq_ = 1, frameFromPresent_ = 0, rotatedAt_ = 0;
     bool streamOn_ = false;
     bool streamToRing(const Geometry* g, Vbo& vb);
 public:
@@ -1184,8 +1189,8 @@ static void patchArrayBuffer(std::size_t offset, std::size_t size, const void* d
 
 bool GlesRenderer::streamToRing(const Geometry* g, Vbo& vb) {
     const std::size_t n = g->corners.size();
-    if (rotatedAt_ != presentSeq_) {               // a new presented frame: the next third
-        rotatedAt_ = presentSeq_;
+    if (rotatedAt_ != frameSeq_) {               // a new presented frame: the next third
+        rotatedAt_ = frameSeq_;
         ringRegion_ = (ringRegion_ + 1) % 3;
         ringUsed_ = 0;
     }
@@ -1214,8 +1219,8 @@ bool GlesRenderer::streamToRing(const Geometry* g, Vbo& vb) {
     ringUsed_ += n;
     vb.streamed = true;
     vb.base = base;
-    vb.streamFrame = presentSeq_;
-    vb.lastWhole = presentSeq_;
+    vb.streamFrame = frameSeq_;
+    vb.lastWhole = frameSeq_;
     vb.rev = g->revision;
     ++g_glesFrame.uploads;
     ++g_glesFrame.streamed;
@@ -1232,14 +1237,14 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
     // revision this buffer holds, only those are written.
     auto it = vbo_.find(g);
     if (it != vbo_.end() && it->second.rev == g->revision) {
-        if (!it->second.streamed || it->second.streamFrame == presentSeq_) return true;
+        if (!it->second.streamed || it->second.streamFrame == frameSeq_) return true;
         // streamed corners are one frame's: unchanged since, it goes back to
         // its own buffer (a whole refill below)
         it->second.streamed = false;
         it->second.rev = 0;
     }
     if (g->corners.empty()) return false;
-    if (streamOn_ && !tieOn_ && it != vbo_.end() && it->second.lastWhole + 1 >= presentSeq_ &&
+    if (streamOn_ && !tieOn_ && it != vbo_.end() && it->second.lastWhole + 1 >= frameSeq_ &&
         !(g->dirtyTo != 0 && g->dirtyTo == g->revision && it->second.rev == g->dirtyFrom &&
           it->second.n == g->corners.size()) &&
         streamToRing(g, it->second))
@@ -1342,7 +1347,7 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
                             static_cast<GLsizeiptr>(v.size() * sizeof(GpuVert)), v.data());
             g_glesFrame.uploadBytes += static_cast<long>(v.size() * sizeof(GpuVert));
             ++g_glesFrame.wholeUploads;
-            vb.lastWhole = presentSeq_;
+            vb.lastWhole = frameSeq_;
             if (glesUploadLog()) std::printf("  [upload] whole refill %p %zu corners rev %llu\n",
                                              static_cast<const void*>(g), v.size(),
                                              static_cast<unsigned long long>(g->revision));
@@ -1371,7 +1376,7 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
     Vbo vb;
     if (it != vbo_.end()) { vb.id = it->second.id; }
     else glGenBuffers(1, &vb.id);
-    vb.lastWhole = presentSeq_;
+    vb.lastWhole = frameSeq_;
     v.resize(g->corners.size());
     for (std::size_t k = 0; k < v.size(); ++k) v[k] = gpuVert(g->corners[k]);
     glBindBuffer(GL_ARRAY_BUFFER, vb.id);
@@ -1545,6 +1550,7 @@ void GlesRenderer::begin(const View& view) {
         deadBufs_.clear();
     }
     ++frameNo_;
+    if (frameFromPresent_ != presentSeq_) { frameFromPresent_ = presentSeq_; ++frameSeq_; }
     st_ = RasterStats{};
     view_ = view;
     fog_ = view.fog;

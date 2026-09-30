@@ -299,9 +299,11 @@ SoupGrid buildOver(const TriangleSoup& tris, double cell, ForEach forEach) {
     g.size = tris.size();
     g.built = true;
     bool any = false;
+    std::size_t included = 0;
     double lo[2] = {1e300, 1e300}, hi[2] = {-1e300, -1e300};
     forEach([&](std::size_t t) {
         any = true;
+        ++included;
         for (int k = 0; k < 3; ++k) {
             const double x = tris[9 * t + 3 * k], z = tris[9 * t + 3 * k + 2];
             lo[0] = std::min(lo[0], x); hi[0] = std::max(hi[0], x);
@@ -322,17 +324,33 @@ SoupGrid buildOver(const TriangleSoup& tris, double cell, ForEach forEach) {
             a[1] = std::min<double>(a[1], tris[9 * t + 3 * k + 2]);
             b[1] = std::max<double>(b[1], tris[9 * t + 3 * k + 2]);
         }
+        // floor, written out: the truncation and one step down for a negative
+        // fraction is `std::floor` for every value an int holds, without the
+        // library call - four a triangle, on every rebuild, and the moving
+        // layers are rebuilt every frame (a console's `grids rebuilt` 6.9 ms)
         const auto axis = [&](double v, double base, int cells) {
-            return std::clamp(static_cast<int>(std::floor((v - base) / g.cell)), 0, cells - 1);
+            const double q = (v - base) / g.cell;
+            int i = static_cast<int>(q);
+            if (q < static_cast<double>(i)) --i;
+            return std::clamp(i, 0, cells - 1);
         };
         i0 = axis(a[0] - kGridEps, g.minX, g.nx); i1 = axis(b[0] + kGridEps, g.minX, g.nx);
         k0 = axis(a[1] - kGridEps, g.minZ, g.nz); k1 = axis(b[1] + kGridEps, g.minZ, g.nz);
     };
     const std::size_t cells = static_cast<std::size_t>(g.nx) * static_cast<std::size_t>(g.nz);
     g.start.assign(cells + 1, 0);
+    // EACH TRIANGLE'S CELL RANGE, WORKED OUT ONCE: the counting pass keeps it
+    // for the filling pass, which used to derive it again (the min/max of six
+    // floats as doubles and four divides). At most 513 cells an axis, so four
+    // 16-bit numbers a triangle.
+    std::vector<std::uint16_t> kept(4 * included);
+    std::size_t at = 0;
     forEach([&](std::size_t t) {
         int i0, i1, k0, k1;
         range(t, i0, i1, k0, k1);
+        std::uint16_t* r = kept.data() + 4 * at++;
+        r[0] = static_cast<std::uint16_t>(i0); r[1] = static_cast<std::uint16_t>(i1);
+        r[2] = static_cast<std::uint16_t>(k0); r[3] = static_cast<std::uint16_t>(k1);
         for (int k = k0; k <= k1; ++k)
             for (int i = i0; i <= i1; ++i)
                 ++g.start[static_cast<std::size_t>(k) * g.nx + i + 1];
@@ -340,11 +358,11 @@ SoupGrid buildOver(const TriangleSoup& tris, double cell, ForEach forEach) {
     for (std::size_t c = 0; c < cells; ++c) g.start[c + 1] += g.start[c];
     g.index.resize(g.start[cells]);
     std::vector<std::uint32_t> cursor(g.start.begin(), g.start.end() - 1);
+    at = 0;
     forEach([&](std::size_t t) {   // ascending, so each cell's list is too
-        int i0, i1, k0, k1;
-        range(t, i0, i1, k0, k1);
-        for (int k = k0; k <= k1; ++k)
-            for (int i = i0; i <= i1; ++i)
+        const std::uint16_t* r = kept.data() + 4 * at++;
+        for (int k = r[2]; k <= r[3]; ++k)
+            for (int i = r[0]; i <= r[1]; ++i)
                 g.index[cursor[static_cast<std::size_t>(k) * g.nx + i]++] =
                     static_cast<std::uint32_t>(t);
     });

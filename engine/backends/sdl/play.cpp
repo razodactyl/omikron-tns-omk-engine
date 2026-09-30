@@ -5975,22 +5975,37 @@ int main(int argc, char** argv) {
             playerSoup.insert(playerSoup.end(), w.soup.begin(), w.soup.end());
             playerSteep.insert(playerSteep.end(), w.steep.begin(), w.steep.end());
         }
+        const double rebuildA = static_cast<double>(SDL_GetPerformanceCounter());
         playerMovingTri.assign(playerSoup.size() / 9, 0);   // new sets: nothing has moved yet
         playerMovingIds.clear();
         rebuildFixedGrid();
         rebuildMovingGrid();
+        const double rebuildB = static_cast<double>(SDL_GetPerformanceCounter());
         steepMovingTri.assign(playerSteep.size() / 9, 0);
         steepMovingIds.clear();
         rebuildSteepFixedGrid();
         rebuildSteepMovingGrid();
         mergedValid = true;
         const double rebuild1 = static_cast<double>(SDL_GetPerformanceCounter());
-        world.setTextures(worldTex);
+        // NOT handed to the renderer here. The frame's pool - the sets', then
+        // the characters', the player's and the sprites' - is composed and set
+        // before anything is drawn, and this bumps `poolComposition`, so it
+        // will be. Setting the sets' textures ALONE first made a backend that
+        // keeps what it has uploaded drop every character and sprite texture
+        // and send them again a moment later: on a console's walk into
+        // Anekbah, `27 dropped` then `18 uploaded, 57 ms`, and again `18
+        // dropped` / `18 uploaded, 52 ms` on the arrival (2026-09-30).
+        // `OMK_POOL_TWICE=1` is the old order, for the comparison.
+        static const bool poolTwice = omk::envSet("OMK_POOL_TWICE");
+        if (poolTwice) world.setTextures(worldTex);
         poolSize = worldTex.size();
         ++poolComposition;   // the character and sprite sections re-append over this
         const double hz = static_cast<double>(SDL_GetPerformanceFrequency());
-        std::printf("world: rebuild - soups and grids %.1f ms, the texture pool %.1f ms\n",
-                    (rebuild1 - rebuild0) * 1000.0 / hz,
+        std::printf("world: rebuild - soups and grids %.1f ms (the merge %.1f, the walkable grid "
+                    "%.1f over %zu triangles, the steep one %.1f over %zu), the texture pool %.1f ms\n",
+                    (rebuild1 - rebuild0) * 1000.0 / hz, (rebuildA - rebuild0) * 1000.0 / hz,
+                    (rebuildB - rebuildA) * 1000.0 / hz, playerSoup.size() / 9,
+                    (rebuild1 - rebuildB) * 1000.0 / hz, playerSteep.size() / 9,
                     (static_cast<double>(SDL_GetPerformanceCounter()) - rebuild1) * 1000.0 / hz);
     };
 

@@ -2280,6 +2280,45 @@ for every set that joins). The set's own preparation could also be halved in
 wall time by splitting geometry from textures-and-soups over two threads, and
 `buildGeometry` pays five map lookups a triangle.
 
+### 36. The texture pool set once, and the grid builder's ranges kept (2026-09-30, M3)
+
+Two more from the 14:00 console log, neither run on a console.
+
+* **The pool was handed to the renderer twice a change.** `rebuildWorld` set
+  the SETS' textures alone, and the frame's own pool - sets, characters,
+  player, sprites - was composed and set a moment later. A backend that keeps
+  what it has uploaded (GLES, by pixel storage) therefore dropped every
+  character and sprite texture and sent them again: the console's walk into
+  Anekbah logs `4 kept, 0 uploaded, 27 dropped` then `18 uploaded, 57.1 ms`,
+  and on the arrival `20 uploaded, 18 dropped, 60.4 ms` then `18 uploaded, 52.1
+  ms`. `rebuildWorld` now only bumps `poolComposition`; nothing is drawn
+  between it and the pool's composition (the pool block is the first thing
+  under `drawWorld`). `OMK_POOL_TWICE=1` is the old order. The restaurant
+  walk-out on the M3: **74 texture uploads -> 54, 18 dropped -> 0**; frames
+  20, 21 and 60 on GLES, 20 and 45 on the software viewer and a cold boot's
+  140th are byte-identical to the old order.
+* **`buildSoupGrid` worked each triangle's cell range out twice** - once to
+  count, once to fill: the min/max of six floats as doubles, four divides and
+  four `std::floor` calls each time. The counting pass now keeps the four cell
+  numbers (16-bit) for the filling pass, and the floor is written out. **The
+  grids are byte-identical**: 32 of them - Anekbah, Aapkayl, Qalisar and
+  AImpasse, walkable and steep, whole, by mask, by id list and at a 64-inch
+  cell - hash the same from the old builder and the new. **No gain measured on
+  the M3** (0.69 against 0.70 ms for Anekbah's pair, with a sweep running
+  beside it): the M3's cost is the cell loops, not the arithmetic. It is kept
+  for the A9, where a double divide and a library `floor` are dear and the
+  moving layers are rebuilt EVERY frame (`grids rebuilt` 6.9 ms) - a guess
+  until a console says. `engine: probe grid` and `ground grid` green.
+* `world: rebuild -` now splits its soups-and-grids into the merge, the
+  walkable grid and the steep one, with their triangle counts.
+* **Two standing reds met again, not this step's**: `engine: split grid` and
+  `engine: sweep grid` - probe and hit COUNTS against 0 mismatches, as the
+  2026-09-29 sweep row records.
+* **A sweep in a worktree is not a sweep**: started beside the work to save
+  the two and a half hours, it reported six `... not built`, a stale
+  `INDEX.md` and `readable/src absent` - a worktree has none of the
+  uncommitted inputs. Killed; the sweep runs in the main tree or not at all.
+
 ## What is NOT in scope
 
 * The software renderer's speed. It is the reference and a comparison tool;

@@ -1525,8 +1525,8 @@ dither and a far object its mask let through.
 
 ### 2026-09-30, morning: the console's answer to the ring, the vehicles, the player and the mirror
 
-Two console logs (`omk-play-20260930-083409.log` - a new game through the
-apartment, the hall and Anekbah; `-083909.log` - the Bowie sequence), no crash:
+Two console logs (`omk-play-20260930-083409.log` - Kay'l's apartment, then
+the city; `-083909.log` - a new game through to the Bowie sequence), no crash:
 
 - **Kay'l's apartment**: sim+draw ~19 ms a frame, from ~256 - the mirror now
   the original's two passes, no read-back (0 frames on the CPU mirror).

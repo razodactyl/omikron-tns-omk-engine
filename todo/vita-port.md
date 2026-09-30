@@ -1522,3 +1522,20 @@ then the real pass over it with no clear - draw order and depth, read
 from its stencil reconstruction to the same two passes. Mac: the GLES and
 Vulkan mirrors agree; both differ from the CPU fallback only by its read-back
 dither and a far object its mask let through.
+
+### 2026-09-30, morning: the console's answer to the ring, the vehicles, the player and the mirror
+
+Two console logs (`omk-play-20260930-083409.log` - a new game through the
+apartment, the hall and Anekbah; `-083909.log` - the Bowie sequence), no crash:
+
+- **Kay'l's apartment**: sim+draw ~19 ms a frame, from ~256 - the mirror now
+  the original's two passes, no read-back (0 frames on the CPU mirror).
+- **Uploads** in the Bowie sequence: 4.3-5.4 a frame, ~0.5 MB, 6-8 ms (from
+  11-14 ms / 16.7 uploads).
+- **"pedestrians, traffic"**: 4.5-9 ms (from 9.5-15.6); its split: `ped serial`
+  0.1, `vehicles` 0.1, **`player` 4.3-4.8 ms whenever he is drawn, 7.8 in
+  Anekbah** (0.4 when not). The player's CPU posing - 1626 corners composed,
+  placed and sent every frame he is on screen - is the section, and it is in
+  nearly all gameplay.
+- Still in Anekbah only: `grid moving` steep 4.9 + floor 1.9, `motion`
+  corners 3.1 + soups 2.2.

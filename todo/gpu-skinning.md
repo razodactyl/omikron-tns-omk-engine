@@ -63,7 +63,7 @@ what the shadows, the head look and the fight read.
 | 2 | the crowd's LIGHT in the shader: `vertexlight.*`'s law (`-(N.L)` over a linear falloff through the `(t*c)>>8` ramp) with the lights a body reaches as uniforms, the normal rotated by the mesh's matrix. Proof: per-vertex colours against `applyLights`, and the frame | **done 2026-09-25** - see below |
 | 3 | the WALKERS take the GPU path when the renderer offers it: no `applyPose`, no `applyLights`, no upload - the matrices only. Proof: the street at density 4, CPU path against GPU path, coverage and colour | **done 2026-09-25** - see below |
 | 4 | the STAGED bodies (scene actors, the speaker) - with the face's morph as its own small dynamic buffer | **done 2026-09-25** for every staged body but a SPEAKER whose line morphs the face - see below |
-| 5 | the PLAYER | |
+| 5 | the PLAYER | **done 2026-09-30** - see below |
 | 6 | the console: the new programs into the shader cache, and a city log | |
 
 Each step ends in a commit and a report, and waits for the reader's go.
@@ -181,3 +181,35 @@ Each step ends in a commit and a report, and waits for the reader's go.
 * **A test run's window is hidden now** (`OMK_NO_GPU_PRESENT=1`): the step's
   first batch put windows in front of the reader, one playing the boot films
   because a zsh `$F` of flags was passed as ONE argument (CLAUDE.md 5).
+
+## Step 5, done - the player (2026-09-30, M3)
+
+* **The original**: Kay'l is an actor like any other. `sub_48D3B0` builds one
+  3x3 a mesh (`sub_494650`: the node's rotation times its parent's, the
+  position beside it) and `sub_4947F0` runs each vertex through it once on the
+  way to the card; nothing keeps a posed copy of a body.
+* **`play.cpp`**: where the renderer poses bodies and nothing this frame reads
+  his corners, the draw is `playerRest` with `playerAffine` - the pose's
+  affines with his placement folded in (`rotateEuler(drawEuler)` about the
+  pelvis's x/z, `t = T - R root`, `T = pos` with the feet and the root drop in
+  y). `applyPose`, the placement loop and the upload do not run. The frames
+  that read corners keep the CPU path, and they are step 28's off-screen list
+  exactly (`cornersUnread`): the feet latch, a clip with variants, `OMK_PLY`,
+  melee, shoot mode, the first-person arm, per-pixel light, mapped shadows.
+  `OMK_CPU_PLAYER=1` forces the CPU path for him alone; `--cpu-bodies` for all.
+* The log says which path drew him when it changes (`frame N: the player posed
+  by the RENDERER ...`), printed where the draw is pushed. The held-object
+  log's fist box reads corners only when they were built the frame before.
+* **Proof** (`omk-play-gles`, GPU against `OMK_CPU_PLAYER=1`, 800x600, the
+  simulation's end state equal in every pair): Anekbah's street standing 19
+  pixels differ; walking, turning 76 degrees and walking again 7, 15 and 8 at
+  frames 40, 75 and 110; Kay'l's flat with its mirror live 20, and 30 after a
+  turn and a walk - the scale the walkers and the staged bodies differ by.
+  SHOWN TO FAIL: the pelvis term dropped from the placement moves 36156.
+  Runs are repeatable (two CPU runs and two GPU runs byte-identical). The
+  1626-corner whole upload, 88 of 89 frames, is gone.
+* **No verify.py check**, for steps 3 and 4's reason (a GL window); `engine:
+  gles pose` covers the math, and `engine: gles tie bake`, `gles state cache`
+  and `player vertical` were run green over the change.
+* **Not seen on a console.** The posing program is the one the walkers already
+  use, so the shader cache needs nothing new.

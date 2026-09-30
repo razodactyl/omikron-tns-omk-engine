@@ -1,4 +1,4 @@
-# Handoff — the PS VITA PORT (begun 2026-09-18; §1 rewritten 2026-09-22, §4 added to 2026-09-29)
+# Handoff — the PS VITA PORT (begun 2026-09-18; §1 rewritten 2026-09-22, §4 added to 2026-09-29, §3b5 rewritten 2026-09-30)
 
 **Read this first to pick up the Vita.** [`vita-port.md`](vita-port.md) is the
 plan (phases, item ids B/P/G/F/A/M) and the running record of every trap met;
@@ -160,35 +160,52 @@ which cannot draw per-pixel light or a shadow map: now refused at start-up
 The port-vs-original audit is `todo/optimization.md` step 28 (the table, then
 dated "DONE" paragraphs); the console results are `todo/vita-port.md`'s
 2026-09-29/30 entries. Last console run: the apartment ~19 ms a frame (native
-mirror), the Bowie sequence ~50-67 ms a frame. Committed up to `f0e9261`, NOT
-pushed; the reader cannot test on the Vita for a while, so the next work
-should be provable byte for byte on the Mac.
+mirror), the Bowie sequence ~50-67 ms a frame. The reader cannot test on the
+Vita for a while, so the next work should be provable on the Mac.
 
-**Next, agreed with the reader**:
-1. **Kay'l on the GPU posing path** (4-8 ms whenever he is drawn): his 1626
-   corners are still posed, placed and uploaded every frame; the walkers,
-   staged bodies and vehicles already draw from a static rest with one affine
-   per mesh. Keep CPU corners only on frames that read them (feet latch, a
-   variant clip, melee's fist, shoot mode's arm, per-pixel light, mapped
-   shadows - the same list as the off-screen gate `playerOffView` in
-   `play.cpp`).
-2. **The sky moved on the GPU** instead of rewritten every frame (it follows
-   the camera in x/z: one affine).
+**Done since that run, none of it seen on a console** (each is a step of
+`todo/optimization.md`):
+* **step 29 - the depth tie decided once per set** and drawn a step back, on
+  GLES and Vulkan: the per-frame tie's CPU (0.5-4.4 ms on the M3, ~50 ms of
+  the console's city frame by the 2026-09-23 log) is gone for the set, and the
+  frame is byte-identical to the per-frame tie's. It replaces step 27's plan.
+  **The console question is now the LOOK**: whether the signs hold on the
+  Vita's own depth buffer with the bake. `OMK_NO_TIE_BAKE=1` is the per-frame
+  tie, `--no-tie` none (the reader has already seen that one flicker).
+* **step 30 - Kay'l posed by the renderer and the sky moved by one
+  translation**: two whole vertex uploads a frame fewer (the street 4.6 -> 2.7
+  on the Mac) and his CPU pose, place and upload (4-8 ms on the console) off
+  every frame that does not read his corners. `OMK_CPU_PLAYER=1` /
+  `OMK_CPU_SKY=1` are the old paths. In the next console log read `the player
+  posed by the RENDERER` and `the sky MOVED BY THE RENDERER`, and the `gles
+  world` line's whole uploads.
 
-Then, in order: the area-change stalls (async loading, the original's one
-128 KB chunk a frame), the voice line start (decode off the main thread), the
-start menu's whole-surface upload, shared sound samples. Anekbah's moving-mesh
-grid + patch (~12 ms, 70x the Mac, unexplained) waits for a console profile.
-Open question: the original draws far walkers (coarsest LOD) to the clip
-distance; the port stops at 40 m.
+**The reader's rule for this work (2026-09-30)**: the original is faster than
+the port, so **read the original's function for each task first** and take
+what it does - it found the mirror's two passes, the crowd LOD, the camera
+clock, and in step 30 that neither the player nor the sky is rewritten.
+
+**Next, in order**: the area-change stalls (async loading, the original's one
+128 KB chunk a frame - `Async_LoadDuringFrame`, row f of step 28), the voice
+line start (decode off the main thread), the start menu's whole-surface
+upload, shared sound samples. Anekbah's moving-mesh grid + patch (~12 ms, 70x
+the Mac, unexplained) waits for a console profile - and row d's fix (a moving
+set mesh drawn from rest with one matrix, as `o3de_SetNodePos` does) is now
+the same mechanism the sky uses. Open: the original draws far walkers
+(coarsest LOD) to the clip distance, the port stops at 40 m; and step 30's
+lead on the pose-dirty flag `0x40000`.
 
 **How every step here was proven**: a byte-compare of dumps with the change
 on and off (env switches: `OMK_NO_SIDECULL`, `OMK_NO_PED_LOD` /
 `OMK_PED_LOD_MAX`, `OMK_STREAM`, `OMK_CPU_MIRROR`, `--cpu-bodies`) on the
 street (`--area 0 --stand 1804,0,-6890,336`), the Bowie sequence (`--area 0
 --stand 6423,-3,1675,154 --zone-enable 78`) and the Impasse (`--area 222
---scene-chunk 55`). Read the original's function first (the reader's rule) -
-it found the mirror's two passes, the crowd LOD and the camera clock.
+--scene-chunk 55`). Three traps from step 30, each of which produced an
+"identical" that meant nothing: **the data is not at `../gamedata` on the M3**
+(`python3 tools/omkpaths.py` says where - a run with no data dumps a black
+frame and exits 0); **the player is not drawn in the Impasse cutscene or under
+the start screen** (use `--area 237 --address 687` for the flat); and **the sky
+is not in every frame** (`--sky 0` against `--sky 1` says whether it is).
 
 ## 3c. The transition hitches (2026-09-23)
 
@@ -203,9 +220,9 @@ built and `gles: texture pool of N - K kept, U uploaded` for each pool change:
 **Read 2026-09-23 morning**: the pool holds, and the models were not it -
 three whole-file READS were (a music switch, a line's `.3DM` read twice, the
 two sprite libraries at every scene change). All three fixed; see
-`vita-port.md`. The city's frame is now led by the depth tie (~50 ms):
-**put `--no-tie` in `args.txt` for one run**, walk Anekbah's shop fronts, and
-say whether the signs flicker.
+`vita-port.md`. The city's frame was then led by the depth tie (~50 ms);
+the reader ran `--no-tie` and the signs FLICKER, so the tie stays and is now
+decided once per set (§3b5, step 29).
 
 **The reader, 2026-09-25**: *"If needed, you can use arm-specific
 instructions (like NEON) as long as you also provide a generic alternative."*
@@ -223,10 +240,9 @@ identical), the music decodes through a table, and the frame makes ~160 heap
 allocations outside the software rasterizer where it made ~724. None of it
 is measured on a console. **The next city log answers it**: its `sections -`
 lines against 2026-09-27's (submit was 42-47 ms), and the new `frame N gles
-state` line every 60 frames - draws, state calls made, skipped. After that,
-**step 27** - the depth tie computed once per set load instead of every
-frame - is the largest single item left, and `--no-tie` in `args.txt` for
-one run still says whether the Vita's own depth test flickers without it.
+state` line every 60 frames - draws, state calls made, skipped. **Step 27 is
+superseded by step 29** (§3b5): the tie is decided once per set and the
+`--no-tie` question is answered - it flickers.
 **And the compiler flags** (step 20): `make vita-tuned` builds the same three
 VPKs with Cortex-A9 scheduling and LTO into `engine/build/vita-tuned/`. Run
 `omk_bench` from each build on the console and compare the `inline ... total`
@@ -259,8 +275,10 @@ times are what only the console can give. Only if the tuned one wins does
 5. The `play.cpp` split ([`play-split.md`](play-split.md)); P3's walker hold
    was tried and does not fire on a street.
 
-The **full `--slow` sweep is due** (`sweep-log.md`: 11 tasks since the last);
-the Vita work so far was verified with `--only` over `engine: vita bench`,
+The full `--slow` sweep was last run 2026-09-29 (`sweep-log.md` carries the
+count since); the Vita work is verified with `--only` over the checks each
+change touches.
+
 ## 5. Traps that cost time - the short list (`vita-port.md` §4 has all of them)
 
 0. **`thread_local` is NOT per thread on the Vita** for the pool's kernel

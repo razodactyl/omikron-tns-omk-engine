@@ -1481,7 +1481,7 @@ posing has since taken most of the body cost, which leaves SUBMIT largest.
 | C2 | the music decoded a byte at a time through branches, on the main thread | console 25-34 ms a decoded second, ~1 ms a frame averaged at 30 fps; the M3's "0.5-0.6 ms a frame" was WRONG - see 16 | a delta / next-index table (step 16) |
 | C3 | the engine's heap churn | a malloc interposer: 115-160k allocations a second at 30 fps, 14% of them from `main` - ~600 and ~2.4 MB a frame | `phSpan` (a `std::map<std::string>`, four lookups a pedestrian), `composePose`'s returned vectors, `draws` not reserved, `vis` per slot, the three motion maps rebuilt a frame, `motionLogged`'s string a motion a frame, `session.props()` by value, `pumpZoneSlots`' map and vector, `sweepSphere` / `soupInBox`'s id vectors, `particleGeometry`'s map of vectors, `applyPose`'s `tieClass` |
 | C4 | per-body lookups that never change | read | cache per model / body |
-| C5 | the player still posed on the CPU | `gpu-skinning.md` step 5 | that step |
+| C5 | the player still posed on the CPU | `gpu-skinning.md` step 5 | **done 2026-09-30**, step 30 |
 | C6 | the moving collision grid rebuilt a frame from 2730 triangles | console "grids" 7 ms | incremental |
 | C7 | Vita flags: `-O2 -mfpu=neon`, no `-mcpu=cortex-a9`, no LTO | `backends/vita/CMakeLists.txt` | measure on `omk_bench` (`-ffp-contract=off` keeps the hash comparable) |
 | C8 | `getenv("OMK_VMTRACE")` and a heap operand vector per VM instruction | the street runs **~50 instructions in 150 frames** (`OMK_VMTRACE`, software build) - cutscenes only | cache the flag; a fixed array |
@@ -2022,6 +2022,47 @@ coincidence CREATED by motion is not baked, as it was not before. **The
 console has not run it**: the Vita build takes the same backend and its
 shader cache re-keys on the changed source, but the tie's console cost and
 the look of the signs on its depth buffer are for the reader.
+
+### 30. Kay'l and the sky as the original moves them (2026-09-30, M3)
+
+The two geometries step 28's `OMK_UPLOAD_LOG` still saw sent whole every frame
+outside the particles and the shadow quads: 1626 corners (the player) and 864
+(the sky). Both read against the original first.
+
+* **The player** - `todo/gpu-skinning.md` step 5. The original poses no copy of
+  a body (`sub_48D3B0` / `sub_494650` / `sub_4947F0`: one 3x3 a mesh, each
+  vertex through it once); on a renderer that poses bodies the port now draws
+  his rest with one affine a mesh, and keeps the CPU corners only on the frames
+  that read them. 7-30 pixels of 480000 against the CPU path on the street,
+  walking and turning, and in the flat with the mirror.
+* **The sky.** `sub_41CF10` writes the node's three floats - the camera's x
+  and z, its own y - and relinks it; the 12.5x scale is `Area_LoadMiscModel`'s,
+  once, at load. The port rewrote all 864 corners and re-sent them every
+  frame. Now, on a renderer that poses bodies, the plane is a static geometry
+  scaled about node 0's origin at load (`Sky::rest`) and drawn with one
+  translation (`OMK_CPU_SKY=1` for the old path); on the others the corners
+  are rewritten only when the camera's x or z CHANGED, so a standing camera
+  sends nothing. **Byte-identical**: GLES static against rewritten on the
+  street (40733 sky pixels in the frame) and on the Bowie sequence's frame 900
+  (29327, the camera flying); the software viewer against `07efd81` on the
+  street, a walk and 900 Bowie frames. SHOWN TO FAIL: the translation 40 units
+  out moves 4428 pixels. Three earlier "identical" results were VACUOUS - the
+  sky was not in those frames, which `--sky 0` against `--sky 1` showed; a
+  comparison of a thing needs a frame the thing is in.
+* **Measured, GLES, a frame (mean of 60)**: the street 5.6 vertex uploads, 4.6
+  whole, 667 KB -> **3.7, 2.7 whole, 585 KB**; the Bowie sequence 5.1, 4.1
+  whole -> **3.1, 2.1**. What is left whole is the shadow quads (180 corners)
+  and the particles (a new size most frames) - per-frame pools in the original
+  too, and what the ring streams on the Vita. On the console each whole upload
+  was ~1 ms (step 28), and the player's CPU pose 4-8 ms; neither is measured
+  there yet.
+* **A lead from the same read, NOT established**: `sub_48D3B0` rebuilds a
+  body's per-mesh matrices from its track quaternions only while node flag
+  `0x40000` is set, and clears it - so the original may skip that work for a
+  body whose pose did not change, where the port runs `composePose` for every
+  drawn body every frame. A literal search of the listing finds ONE writer of
+  the bit (`sub_41D3F0` case 3, on a decor slot's node); who sets it on an
+  actor is not read. Read that before building a pose cache on it.
 
 ## What is NOT in scope
 

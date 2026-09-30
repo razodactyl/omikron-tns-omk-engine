@@ -3216,6 +3216,11 @@ int main(int argc, char** argv) {
     omk::MeshNameIndex playerBoneIdx;      // rebuilt wherever `playerMeshes` is
     std::vector<omk::Texture> playerTex;
     omk::Geometry playerRest, playerPosed;
+    // ...or, where the renderer poses bodies, his REST drawn with one affine a
+    // mesh (`todo/gpu-skinning.md` step 5). `playerPosedFrame` is the last
+    // frame his corners were built on the CPU - what a corner reader must check.
+    std::vector<float> playerAffine;
+    long playerPosedFrame = -1;
     std::vector<omk::CollisionSphere> playerSpheres;   // the crowd push tests these
     float playerReach = 0.0f;                           // his model's +88
     omk::TriangleSoup playerSoup;
@@ -5605,8 +5610,16 @@ int main(int argc, char** argv) {
     // is what a domed city has.
     struct Sky {
         std::string stem;
-        omk::Geometry geo;                 // the plane, rebuilt each frame
+        omk::Geometry geo;                 // the plane, rewritten when the camera moves
         std::vector<omk::Corner> base;     // ...from these, as loaded
+        // ...or, on a renderer that poses bodies, MOVED AS THE ENGINE MOVES
+        // IT: `sub_41CF10` writes the node's three floats and nothing else, so
+        // the plane is a static geometry - scaled about node 0's origin once,
+        // at load - and one translation a frame.
+        omk::Geometry rest;
+        std::vector<float> affine;         // 12 floats a mesh, all the same
+        float placedAt[2] = {0, 0};        // the camera x/z `geo` was written for
+        bool  placed = false;
         std::vector<omk::Texture> tex;
         std::size_t texBase = 0;
         float origin[3] = {0, 0, 0};       // node 0's own position
@@ -12499,6 +12512,14 @@ int main(int argc, char** argv) {
                                 if (!ms.empty())
                                     for (int k = 0; k < 3; ++k) sky.origin[k] = ms[0].pos[k];
                             }
+                            sky.rest = sky.geo;
+                            for (auto& c : sky.rest.corners) {
+                                c.x = (c.x - sky.origin[0]) * kSkyScale;
+                                c.y = (c.y - sky.origin[1]) * kSkyScale;
+                                c.z = (c.z - sky.origin[2]) * kSkyScale;
+                            }
+                            sky.rest.revision = ++worldGeoRev;
+                            sky.placed = false;
                             std::printf("sky: %s - %zu corners, %zu texture(s), origin"
                                         " %.1f %.1f %.1f, drawn at y %.1f\n",
                                         wantSky.c_str(), sky.base.size(), sky.tex.size(),
@@ -13641,7 +13662,7 @@ int main(int argc, char** argv) {
                             omk::rotateYaw(yaw, hin, ho);
                             // the FIST as drawn: the hand mesh's corners in playerPosed, world
                             float flo[3] = {1e9f, 1e9f, 1e9f}, fhi[3] = {-1e9f, -1e9f, -1e9f}; std::size_t fc = 0;
-                            for (std::size_t c = 0; c < playerPosed.corners.size(); ++c) {
+                            for (std::size_t c = 0; playerPosedFrame == n - 1 && c < playerPosed.corners.size(); ++c) {
                                 if (c >= playerPosed.cornerMesh.size() || playerPosed.cornerMesh[c] != hand) continue;
                                 const auto& w = playerPosed.corners[c]; ++fc;
                                 flo[0] = std::min(flo[0], w.x); fhi[0] = std::max(fhi[0], w.x);
@@ -13651,7 +13672,7 @@ int main(int argc, char** argv) {
                             std::printf("held %d: hand node %.1f %.1f %.1f q(%.2f %.2f %.2f %.2f); object centre "
                                         "%.1f %.1f %.1f box [%.1f..%.1f %.1f..%.1f %.1f..%.1f] %zu corners %zu batches "
                                         "(mat %d texBase %zu); fist box [%.1f..%.1f %.1f..%.1f %.1f..%.1f] %zu corners "
-                                        "(as drawn LAST frame); player %.1f %.1f %.1f yaw %.0f; camera eye %.0f %.0f %.0f\n",
+                                        "(as drawn LAST frame; 0 when the renderer posed him); player %.1f %.1f %.1f yaw %.0f; camera eye %.0f %.0f %.0f\n",
                                         pr.id, ho[0] + pp[0], ho[1] + pp[1] - playerFeet + lastRootDrop, ho[2] + pp[2],
                                         hp.q.w, hp.q.x, hp.q.y, hp.q.z,
                                         cx, cy, cz, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], cnt,
@@ -17371,6 +17392,7 @@ int main(int argc, char** argv) {
             }
             const double player0 = phaseNow();
             bool playerOffView = false;    // his corners not built, his body not drawn
+            bool playerGpu = false;        // his corners not built, his rest drawn by the renderer
             if (drawPlayer || drawArm) {
                 // THE PLAYER, posed by his channel's clip - the quaternions
                 // alone, since the root motion is the position the walker
@@ -17406,13 +17428,30 @@ int main(int argc, char** argv) {
                     const float* p0 = player->pos();
                     const float centre[3] = {p0[0], p0[1] - 35.0f, p0[2]};
                     const bool standingNow = player->clipName() == "H_STAND";
-                    playerOffView = playerFeetKnown && !(standingNow && !playerStandLatched) &&
-                                    player->variantCount() <= 1 && !omk::envSet("OMK_PLY") &&
-                                    !fightRun.active && !session.shootMode().active() && !drawArm &&
-                                    lighting == 0 && !(drawShadows && shadowQuality >= 2) &&
-                                    outsideView(centre, 150.0f, true);
+                    const bool cornersUnread =
+                        playerFeetKnown && !(standingNow && !playerStandLatched) &&
+                        player->variantCount() <= 1 && !omk::envSet("OMK_PLY") &&
+                        !fightRun.active && !session.shootMode().active() && !drawArm &&
+                        lighting == 0 && !(drawShadows && shadowQuality >= 2);
+                    playerOffView = cornersUnread && outsideView(centre, 150.0f, true);
+                    // IN THE VIEW, AS THE ORIGINAL DRAWS ANY ACTOR: `sub_48D3B0`
+                    // builds one 3x3 a mesh (`sub_494650`: the node's rotation
+                    // times its parent's, the position beside it) and
+                    // `sub_4947F0` runs each vertex through it once, on the way
+                    // to the card - nothing keeps a posed copy of the body. On
+                    // a renderer that poses bodies that is his rest, uploaded
+                    // once, and one affine a mesh with his placement folded in
+                    // (`todo/gpu-skinning.md` step 5); the frames that READ his
+                    // corners - the list above - keep the CPU path.
+                    static const bool cpuPlayer = omk::envSet("OMK_CPU_PLAYER");   // A/B only
+                    playerGpu = cornersUnread && !playerOffView && drawPlayer && !cpuBodiesFlag &&
+                                !cpuPlayer && world.posesBodies() &&
+                                playerRest.cornerMesh.size() == playerRest.corners.size();
                 }
-                if (!playerOffView) omk::applyPose(playerPosed, playerRest, playerMeshes, pose);
+                if (!playerOffView && !playerGpu) {
+                    omk::applyPose(playerPosed, playerRest, playerMeshes, pose);
+                    playerPosedFrame = n;
+                }
                 // THE ANCHOR IS THE FLOOR, NOT THE HIPS (omk-play 69).
                 //
                 // `playerFeet` used to be latched from the FIRST pose - the
@@ -17725,7 +17764,24 @@ int main(int argc, char** argv) {
                 // ahead of the character". The actor's own origin is the
                 // pelvis (`player.h`, settled with the camera lift), so that
                 // is what must stay put.
-                if (!playerOffView) for (auto& c : playerPosed.corners) {
+                if (playerGpu) {
+                    // the loop below as a 3x4: turned about the pelvis's x/z
+                    // (`t = T - R root`), then stood at `pp` on his feet
+                    float place[12];
+                    for (int j = 0; j < 3; ++j) {
+                        const float e[3] = {j == 0 ? 1.0f : 0.0f, j == 1 ? 1.0f : 0.0f,
+                                            j == 2 ? 1.0f : 0.0f};
+                        float col[3];
+                        omk::rotateEuler(drawEuler, e, col);
+                        for (int r = 0; r < 3; ++r) place[4 * r + j] = col[r];
+                    }
+                    const float T[3] = {pp[0], pp[1] - playerFeet + rootDrop, pp[2]};
+                    for (int r = 0; r < 3; ++r)
+                        place[4 * r + 3] = T[r] - (place[4 * r] * playerRootXZ[0] +
+                                                   place[4 * r + 2] * playerRootXZ[1]);
+                    omk::meshAffines(playerMeshes, pose, place, playerAffine);
+                }
+                if (!playerOffView && !playerGpu) for (auto& c : playerPosed.corners) {
                     const float in[3] = {c.x - playerRootXZ[0], c.y,
                                          c.z - playerRootXZ[1]};
                     float r[3];
@@ -17783,7 +17839,7 @@ int main(int argc, char** argv) {
                 }
                 playerMeshAtKnown = true;
                 lastRootDrop = rootDrop;
-                if (!playerOffView) playerPosed.revision = ++worldGeoRev;
+                if (!playerOffView && !playerGpu) playerPosed.revision = ++worldGeoRev;
                 for (int k = 0; k < 3; ++k) actorAt[k] = pp[k];
                 actorAt[1] -= playerFeet;
                 actorKnown = true;
@@ -17989,19 +18045,57 @@ int main(int argc, char** argv) {
             if (drawSky && !sky.base.empty() && !sky.geo.batches.empty()) {
                 const float sx = view.cam.eye[0], sz = view.cam.eye[2];
                 const float sy = sky.origin[1] - kSkyLift;
-                for (std::size_t k = 0; k < sky.base.size(); ++k) {
-                    const omk::Corner& b0 = sky.base[k];
-                    omk::Corner& c = sky.geo.corners[k];
-                    c = b0;
-                    c.x = sx + (b0.x - sky.origin[0]) * kSkyScale;
-                    c.y = sy + (b0.y - sky.origin[1]) * kSkyScale;
-                    c.z = sz + (b0.z - sky.origin[2]) * kSkyScale;
+                static const bool cpuSky = omk::envSet("OMK_CPU_SKY");   // A/B only
+                const bool skyGpu = !cpuSky && !cpuBodiesFlag && world.posesBodies() &&
+                                    sky.rest.cornerMesh.size() == sky.rest.corners.size() &&
+                                    !sky.rest.corners.empty();
+                static int skyPathWas = -1;
+                if (skyPathWas != (skyGpu ? 1 : 0)) {
+                    skyPathWas = skyGpu ? 1 : 0;
+                    std::printf("frame %ld: the sky %s - %zu corners\n", n,
+                                skyGpu ? "MOVED BY THE RENDERER (static, one translation a frame)"
+                                       : "rewritten on the CPU when the camera moves",
+                                sky.base.size());
                 }
-                sky.geo.revision = ++worldGeoRev;
-                for (const auto& b : sky.geo.batches)
-                    draws.push_back({0x800u | ((static_cast<std::uint32_t>(b.material) +
-                                                static_cast<std::uint32_t>(sky.texBase)) & 0x3Fu),
-                                     &sky.geo, b.start, b.count, omk::Blend::Opaque, false});
+                if (skyGpu) {
+                    std::int32_t meshes = 0;
+                    for (const std::int32_t m : sky.rest.cornerMesh) meshes = std::max(meshes, m + 1);
+                    sky.affine.assign(12u * static_cast<std::size_t>(meshes), 0.0f);
+                    for (std::int32_t m = 0; m < meshes; ++m) {
+                        float* a = sky.affine.data() + 12 * m;
+                        a[0] = a[5] = a[10] = 1.0f;
+                        a[3] = sx; a[7] = sy; a[11] = sz;
+                    }
+                    for (const auto& b : sky.rest.batches) {
+                        draws.push_back({0x800u | ((static_cast<std::uint32_t>(b.material) +
+                                                    static_cast<std::uint32_t>(sky.texBase)) & 0x3Fu),
+                                         &sky.rest, b.start, b.count, omk::Blend::Opaque, false});
+                        draws.back().meshPose = sky.affine.data();
+                        draws.back().meshPoses = static_cast<std::size_t>(meshes);
+                    }
+                } else {
+                    // ...and on the CPU only when the camera's x or z CHANGED:
+                    // the same corners are the same bytes, and a revision left
+                    // alone is a buffer not sent again
+                    if (!sky.placed || sky.placedAt[0] != sx || sky.placedAt[1] != sz) {
+                        for (std::size_t k = 0; k < sky.base.size(); ++k) {
+                            const omk::Corner& b0 = sky.base[k];
+                            omk::Corner& c = sky.geo.corners[k];
+                            c = b0;
+                            c.x = sx + (b0.x - sky.origin[0]) * kSkyScale;
+                            c.y = sy + (b0.y - sky.origin[1]) * kSkyScale;
+                            c.z = sz + (b0.z - sky.origin[2]) * kSkyScale;
+                        }
+                        sky.geo.revision = ++worldGeoRev;
+                        sky.placed = true;
+                        sky.placedAt[0] = sx;
+                        sky.placedAt[1] = sz;
+                    }
+                    for (const auto& b : sky.geo.batches)
+                        draws.push_back({0x800u | ((static_cast<std::uint32_t>(b.material) +
+                                                    static_cast<std::uint32_t>(sky.texBase)) & 0x3Fu),
+                                         &sky.geo, b.start, b.count, omk::Blend::Opaque, false});
+                }
             }
 
             // THE VISIBLE SET, and it is the CLIP DISTANCE that sizes it.
@@ -18630,7 +18724,34 @@ int main(int argc, char** argv) {
                                      &up->posed, b.start, b.count, b.blend, b.cutout,
                                      litCrowd, castShadows});
             }
-            if (drawPlayer && !playerOffView)
+            // which path drew him, said when it changes - and counted, for the
+            // runs that compare the two
+            {
+                static int pathWas = -1;
+                static long gpuFrames = 0, cpuFrames = 0;
+                const int path = !drawPlayer ? 0 : playerGpu ? 1 : playerOffView ? 2 : 3;
+                gpuFrames += path == 1;
+                cpuFrames += path == 3;
+                if (path != pathWas) {
+                    pathWas = path;
+                    static const char* const names[4] = {
+                        "not drawn", "posed by the RENDERER (his rest, one affine a mesh)",
+                        "outside the view, not drawn", "posed on the CPU"};
+                    std::printf("frame %ld: the player %s - %zu meshes, %zu corners; so far %ld "
+                                "frames by the renderer, %ld on the CPU\n", n, names[path],
+                                playerMeshes.size(), playerRest.corners.size(), gpuFrames, cpuFrames);
+                }
+            }
+            if (drawPlayer && playerGpu) {
+                for (const auto& b : playerRest.batches) {
+                    draws.push_back({keyOf(b.blend, b.cutout, static_cast<std::uint32_t>(
+                                               b.material + static_cast<int>(playerTexBase))),
+                                     &playerRest, b.start, b.count, b.blend, b.cutout,
+                                     litStaged, castShadows});
+                    draws.back().meshPose = playerAffine.data();
+                    draws.back().meshPoses = playerMeshes.size();
+                }
+            } else if (drawPlayer && !playerOffView)
                 for (const auto& b : playerPosed.batches)
                     draws.push_back({keyOf(b.blend, b.cutout, static_cast<std::uint32_t>(
                                                b.material + static_cast<int>(playerTexBase))),

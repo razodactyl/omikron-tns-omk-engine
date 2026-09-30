@@ -1869,6 +1869,33 @@ films play in real time at 44100, the device reopens at 22050 when they end,
 and track 109's ten-second peak is 0.790 - the console log's own figure. The
 Vita's SDL (2.32.8) opens its BGM port for a rate under 48000, which 22050 is.
 
+**The whole-buffer uploads - DONE 2026-09-30.** The console's Bowie frame sent
+16.7 vertex buffers a frame, 15.7 of them WHOLE, for 15.9 ms - about 1 ms an
+upload whatever its size, vitaGL's allocate-and-copy for a buffer drawn in the
+last frames (a size change is a new `glBufferData`). `OMK_UPLOAD_LOG=1` names
+them: the sky (864 corners, rewritten every frame because it follows the
+camera), a 1626-corner geometry every frame, bodies posed on the CPU (~1530),
+the particles (~6650, a new size every frame), shadow quads. **GLES**: a
+geometry sent whole in consecutive frames is STREAMED into one ring allocated
+once, a third per presented frame (reused two frames later), drawn at an
+offset - on the Vita written through `glMapBuffer` into the ring's own memory.
+The frame is counted on present (the mirror pass begins twice). Off with the
+depth tie; on by default on the Vita, `OMK_STREAM=1` elsewhere. Byte-identical
+streamed and not on the Bowie frame, the street and the Impasse cutscene;
+whole uploads 7.1 -> 0.1 a frame on the Mac, 7.0 streamed. **Vulkan** had the
+same fault in its own form: a size change destroyed the buffer and allocated
+device memory, every frame for the particles; a buffer now keeps a CAPACITY, a
+re-sized geometry getting half as much again (a first allocation stays exact).
+Byte-identical to the previous Vulkan code on the Bowie frame.
+
+**The grid and the patch - instrumented, not changed.** On the Mac the moving
+layers are 39 x 49 and 64 x 49 cells with ~1500 and ~2800 entries, and the
+patch ~16000 points: well under a millisecond on the A9, against the console's
+6.9 + 5.7 ms. Something inflates them there; one candidate is the vitaGL
+garbage collector freeing the fifteen buffers a frame the whole uploads
+queued, which the ring removes. The next log splits them: `grid moving (floor)`
+/ `(steep)`, `motion corners` / `motion soups`.
+
 **Correction, 2026-09-30 - the upload counter overstated.** GLES booked a
 PARTIAL upload at the whole geometry's size, so the set's 69-run motion patch
 read as 5 MB every frame; row (a)'s "53 uploads, 7.1 MB, 34 ms" and its split

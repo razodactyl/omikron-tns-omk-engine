@@ -148,7 +148,7 @@ void glesTakeTimings(double out[4]);
 std::string glesFrameReport();
 long glesTakePatches();
 long glesTakeTiePatches();
-void glesTakeWindow(double out[6]);
+void glesTakeWindow(double out[7]);
 void glesTakeStateCalls(long out[3]);
 void glesGeometryStats(Renderer*, long out[3]);
 long glesTakeOverlayRows(Renderer*);
@@ -6738,8 +6738,10 @@ int main(int argc, char** argv) {
                                   "a Corner is 12 floats with x, y, z first");
                     const auto& meshCorners = w.cornersOfMesh[static_cast<std::size_t>(mi)];
                     dirty.insert(dirty.end(), meshCorners.begin(), meshCorners.end());
+                    const double motionCorners0 = phaseNow();
                     omk::placePoints(pp, &w.baseCorners[0].x, 12, &w.geo.corners[0].x, 12,
                                      meshCorners.data(), meshCorners.size());
+                    phSpan["motion corners"] += phaseNow() - motionCorners0;
                     // the collision soups follow the mesh exactly as the
                     // render corners above (`Sweep_MeshTest` collides
                     // against the mesh's CURRENT matrix)
@@ -6759,8 +6761,10 @@ int main(int argc, char** argv) {
                         if (!pts.empty())
                             omk::placePoints(pp, base.data(), 3, soup.data(), 3, pts.data(), pts.size());
                     };
+                    const double motionSoups0 = phaseNow();
                     patchSoup(w.soup, w.baseSoup, w.soupTrisOfMesh[static_cast<std::size_t>(mi)], movedSoup[sl]);
                     patchSoup(w.steep, w.baseSteep, w.steepTrisOfMesh[static_cast<std::size_t>(mi)], movedSteep[sl]);
+                    phSpan["motion soups"] += phaseNow() - motionSoups0;
                     soupsMoved = true;
                     moved = true;
                 }
@@ -6944,12 +6948,12 @@ int main(int argc, char** argv) {
             spanned("grid fixed", [&] {
                 if (newlyMoving || !playerGrid.fixed.matches(playerSoup)) rebuildFixedGrid();
             });
-            spanned("grid moving", [&] { rebuildMovingGrid(); });
+            spanned("grid moving (floor)", [&] { rebuildMovingGrid(); });
             if (newlySteep) std::sort(steepMovingIds.begin(), steepMovingIds.end());
             spanned("grid fixed", [&] {
                 if (newlySteep || !playerSteepGrid.fixed.matches(playerSteep)) rebuildSteepFixedGrid();
             });
-            spanned("grid moving", [&] { rebuildSteepMovingGrid(); });
+            spanned("grid moving (steep)", [&] { rebuildSteepMovingGrid(); });
             mark("scripted motion: grids rebuilt");
             // `OMK_VERIFY_SPLIT=1`: the moved triangles' centres from above and a
             // fixed lattice over the street, probed through the two-layer grid and
@@ -6986,9 +6990,12 @@ int main(int argc, char** argv) {
                     for (int gz = -4; gz <= 4; ++gz)
                         check(1804.0 + gx * 900.0, -2000.0, -6890.0 + gz * 900.0);
                 if (frames % 30 == 0)
-                    std::printf("split verify: %ld moving frames, %ld probes, %ld mismatched, fixed %d x %d, moving %zu entries\n",
+                    std::printf("split verify: %ld moving frames, %ld probes, %ld mismatched, fixed %d x %d, moving %zu entries "
+                                "in %d x %d (steep moving %d x %d, %zu entries)\n",
                                 frames, probes, mismatched, playerGrid.fixed.nx, playerGrid.fixed.nz,
-                                playerGrid.moving.index.size());
+                                playerGrid.moving.index.size(), playerGrid.moving.nx, playerGrid.moving.nz,
+                                playerSteepGrid.moving.nx, playerSteepGrid.moving.nz,
+                                playerSteepGrid.moving.index.size());
             }
         }
 
@@ -21437,12 +21444,13 @@ int main(int argc, char** argv) {
                                     sc[0] / 60.0, sc[1] / 60.0, sc[2] / 60.0);
                     }
                     {
-                        double gw[6];
+                        double gw[7];
                         omk::glesTakeWindow(gw);
                         std::printf("frame %ld gles world (a frame, mean of 60): %.1f vertex uploads, "
-                                    "%.1f of them whole, %.0f KB sent, %.1f ms; draws %.1f ms, ties %.1f ms\n", n,
-                                    gw[0] / 60.0, gw[5] / 60.0, gw[1] / 60.0, gw[2] / 60.0, gw[3] / 60.0,
-                                    gw[4] / 60.0);
+                                    "%.1f of them whole, %.1f streamed, %.0f KB sent, %.1f ms; draws %.1f ms, "
+                                    "ties %.1f ms\n", n,
+                                    gw[0] / 60.0, gw[5] / 60.0, gw[6] / 60.0, gw[1] / 60.0, gw[2] / 60.0,
+                                    gw[3] / 60.0, gw[4] / 60.0);
                     }
                     std::printf("frame %ld overlay: %ld plane rows re-sent in 60 frames\n", n,
                                 omk::glesTakeOverlayRows(glRen));

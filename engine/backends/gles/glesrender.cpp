@@ -457,7 +457,8 @@ bool g_glesInTie = false;
 // in the log to say which GL call it was.
 struct GlesFrameCounts {
     double uploadMs = 0, tieMs = 0, drawMs = 0, texMs = 0;
-    long uploads = 0, uploadBytes = 0, patches = 0, patchedBuffers = 0, draws = 0, wholeUploads = 0;
+    long uploads = 0, uploadBytes = 0, patches = 0, patchedBuffers = 0, draws = 0, wholeUploads = 0,
+         streamed = 0;
 } g_glesFrame;
 // ...and the same counts summed over the 60-frame window, so a console log at
 // 65 ms a frame says what the world submit spent without waiting for a frame
@@ -466,6 +467,13 @@ GlesFrameCounts g_glesWindow;
 // THE PER-DRAW STATE, set and skipped, since the last `glesTakeStateCalls`
 // (todo/optimization.md step 17): what the draw-state cache saves.
 long g_glesStateSet = 0, g_glesStateSkipped = 0, g_glesDrawsWindow = 0;
+// `OMK_UPLOAD_LOG=1`: every WHOLE vertex upload, named by geometry and size -
+// which geometries a frame re-sends in full, the cost the console's `gles world`
+// line measures (2026-09-30)
+bool glesUploadLog() {
+    static const bool on = std::getenv("OMK_UPLOAD_LOG") != nullptr;
+    return on;
+}
 double glesClockMs() {
     return std::chrono::duration<double, std::milli>(
                std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -500,8 +508,9 @@ void glesTakeStateCalls(long out[3]) {
 
 // the world frames' counts summed since the last call: uploads, KB SENT,
 // upload ms, draw ms, tie ms, and how many of the uploads were WHOLE buffers
-void glesTakeWindow(double out[6]) {
+void glesTakeWindow(double out[7]) {
     out[5] = static_cast<double>(g_glesWindow.wholeUploads);
+    out[6] = static_cast<double>(g_glesWindow.streamed);
     out[0] = static_cast<double>(g_glesWindow.uploads);
     out[1] = static_cast<double>(g_glesWindow.uploadBytes) / 1024.0;
     out[2] = g_glesWindow.uploadMs; out[3] = g_glesWindow.drawMs; out[4] = g_glesWindow.tieMs;
@@ -581,7 +590,37 @@ private:
     // different sizes, and a key on the storage alone let the second upload
     // delete the texture the first slot still drew with
     std::map<std::tuple<const std::uint8_t*, int, int>, Uploaded> uploaded_;
-    struct Vbo { GLuint id = 0; std::size_t n = 0; std::uint64_t rev = 0; };
+    struct Vbo {
+        GLuint id = 0; std::size_t n = 0; std::uint64_t rev = 0;
+        // STREAMED (2026-09-30): this frame's corners live in the ring at
+        // corner `base`, not in `id`; valid for the frame `streamFrame` only
+        bool streamed = false;
+        std::size_t base = 0;
+        unsigned long streamFrame = 0;
+        unsigned long lastWhole = 0;   // the last frame it was sent WHOLE (+1; 0 never)
+    };
+    // THE STREAMING RING (todo/optimization.md step 28, 2026-09-30). A geometry
+    // re-sent WHOLE frame after frame - the sky that follows the camera, the
+    // particles, a body posed on the CPU, the shadow quads - cost the console
+    // about 1 ms an upload whatever its size: vitaGL's `glBufferSubData` on a
+    // buffer drawn in the last frames allocates a new buffer and copies, and a
+    // size change is a new `glBufferData`. So such a geometry is written into
+    // one ring allocated once, a third of it per presented frame, and drawn
+    // from there at an offset; a third is reused only two presented frames
+    // later, after the GPU is done with it. The frame is counted on PRESENT,
+    // not on `begin` - the mirror pass begins twice a frame. Off while the
+    // depth tie is on (it keeps per-buffer state). On by default on the Vita,
+    // `OMK_STREAM=1` elsewhere and `OMK_NO_STREAM=1` off.
+    static constexpr std::size_t kRingCorners = 49152;   // a third: 1.7 MB of GpuVert
+    GLuint ring_ = 0;
+    int ringRegion_ = 0;
+    std::size_t ringUsed_ = 0;
+    unsigned long presentSeq_ = 1, rotatedAt_ = 0;
+    bool streamOn_ = false;
+    bool streamToRing(const Geometry* g, Vbo& vb);
+public:
+    void notePresent() { ++presentSeq_; }
+private:
 
     bool uploadGeometry(const Geometry* g);
     void resolveTies(const Draw& d, Vbo& vb);
@@ -913,6 +952,11 @@ bool GlesRenderer::init(int w, int h) {
 
     static const bool noTie = std::getenv("OMK_NO_TIE") != nullptr;
     if (noTie) tieOn_ = false;
+#if defined(__vita__)
+    streamOn_ = std::getenv("OMK_NO_STREAM") == nullptr;
+#else
+    streamOn_ = std::getenv("OMK_STREAM") != nullptr;
+#endif
     if (posed_ && !poseSelfTest()) {
         glDeleteProgram(posed_);
         posed_ = 0;
@@ -1133,14 +1177,69 @@ static void patchArrayBuffer(std::size_t offset, std::size_t size, const void* d
                     static_cast<GLsizeiptr>(size), data);
 }
 
+bool GlesRenderer::streamToRing(const Geometry* g, Vbo& vb) {
+    const std::size_t n = g->corners.size();
+    if (rotatedAt_ != presentSeq_) {               // a new presented frame: the next third
+        rotatedAt_ = presentSeq_;
+        ringRegion_ = (ringRegion_ + 1) % 3;
+        ringUsed_ = 0;
+    }
+    if (ringUsed_ + n > kRingCorners) return false;   // this frame's third is full
+    if (!ring_) {
+        glGenBuffers(1, &ring_);
+        glBindBuffer(GL_ARRAY_BUFFER, ring_);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(3 * kRingCorners * sizeof(GpuVert)),
+                     nullptr, GL_DYNAMIC_DRAW);
+    }
+    std::vector<GpuVert>& v = up_;
+    v.resize(n);
+    for (std::size_t k = 0; k < n; ++k) v[k] = gpuVert(g->corners[k]);
+    const std::size_t base = static_cast<std::size_t>(ringRegion_) * kRingCorners + ringUsed_;
+    glBindBuffer(GL_ARRAY_BUFFER, ring_);
+    ds_.attrBuf = 0;                                // the draws re-point their attributes
+#if defined(__vita__)
+    // the ring's own memory: a third the GPU finished with two frames ago
+    if (void* mem = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY)) {
+        std::memcpy(static_cast<unsigned char*>(mem) + base * sizeof(GpuVert), v.data(), n * sizeof(GpuVert));
+        glUnmapBuffer(GL_ARRAY_BUFFER);
+    } else
+#endif
+    glBufferSubData(GL_ARRAY_BUFFER, static_cast<GLintptr>(base * sizeof(GpuVert)),
+                    static_cast<GLsizeiptr>(n * sizeof(GpuVert)), v.data());
+    ringUsed_ += n;
+    vb.streamed = true;
+    vb.base = base;
+    vb.streamFrame = presentSeq_;
+    vb.lastWhole = presentSeq_;
+    vb.rev = g->revision;
+    ++g_glesFrame.uploads;
+    ++g_glesFrame.streamed;
+    g_glesFrame.uploadBytes += static_cast<long>(n * sizeof(GpuVert));
+    if (glesUploadLog()) std::printf("  [upload] streamed %p %zu corners at %zu\n",
+                                     static_cast<const void*>(g), n, base);
+    return true;
+}
+
 bool GlesRenderer::uploadGeometry(const Geometry* g) {
     // The Vulkan backend's contract, verbatim in intent: cached by POINTER
     // while the revision holds; the same object with new vertices refills in
     // place, and when the geometry names the corners that moved since the
     // revision this buffer holds, only those are written.
     auto it = vbo_.find(g);
-    if (it != vbo_.end() && it->second.rev == g->revision) return true;
+    if (it != vbo_.end() && it->second.rev == g->revision) {
+        if (!it->second.streamed || it->second.streamFrame == presentSeq_) return true;
+        // streamed corners are one frame's: unchanged since, it goes back to
+        // its own buffer (a whole refill below)
+        it->second.streamed = false;
+        it->second.rev = 0;
+    }
     if (g->corners.empty()) return false;
+    if (streamOn_ && !tieOn_ && it != vbo_.end() && it->second.lastWhole + 1 >= presentSeq_ &&
+        !(g->dirtyTo != 0 && g->dirtyTo == g->revision && it->second.rev == g->dirtyFrom &&
+          it->second.n == g->corners.size()) &&
+        streamToRing(g, it->second))
+        return true;
+    if (it != vbo_.end()) it->second.streamed = false;
     std::vector<GpuVert>& v = up_;
     v.clear();
     ++g_glesFrame.uploads;
@@ -1238,6 +1337,10 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
                             static_cast<GLsizeiptr>(v.size() * sizeof(GpuVert)), v.data());
             g_glesFrame.uploadBytes += static_cast<long>(v.size() * sizeof(GpuVert));
             ++g_glesFrame.wholeUploads;
+            vb.lastWhole = presentSeq_;
+            if (glesUploadLog()) std::printf("  [upload] whole refill %p %zu corners rev %llu\n",
+                                             static_cast<const void*>(g), v.size(),
+                                             static_cast<unsigned long long>(g->revision));
         }
 #if defined(__APPLE__)
         // ...and on the desktop, the BUFFER itself against a whole upload's
@@ -1263,6 +1366,7 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
     Vbo vb;
     if (it != vbo_.end()) { vb.id = it->second.id; }
     else glGenBuffers(1, &vb.id);
+    vb.lastWhole = presentSeq_;
     v.resize(g->corners.size());
     for (std::size_t k = 0; k < v.size(); ++k) v[k] = gpuVert(g->corners[k]);
     glBindBuffer(GL_ARRAY_BUFFER, vb.id);
@@ -1273,6 +1377,10 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
                  v.data(), GL_DYNAMIC_DRAW);
     g_glesFrame.uploadBytes += static_cast<long>(v.size() * sizeof(GpuVert));
     ++g_glesFrame.wholeUploads;
+    if (glesUploadLog()) std::printf("  [upload] new buffer %p %zu corners rev %llu%s\n",
+                                     static_cast<const void*>(g), v.size(),
+                                     static_cast<unsigned long long>(g->revision),
+                                     it != vbo_.end() ? " (resized)" : "");
     vb.n = v.size();
     vb.rev = g->revision;
     vbo_[g] = vb;
@@ -1354,6 +1462,7 @@ void GlesRenderer::begin(const View& view) {
     g_glesWindow.drawMs += g_glesFrame.drawMs;
     g_glesWindow.tieMs += g_glesFrame.tieMs;
     g_glesWindow.wholeUploads += g_glesFrame.wholeUploads;
+    g_glesWindow.streamed += g_glesFrame.streamed;
     g_glesFrame = GlesFrameCounts{};
     if (!deadBufs_.empty()) {
         glDeleteBuffers(static_cast<GLsizei>(deadBufs_.size()), deadBufs_.data());
@@ -1672,7 +1781,9 @@ void GlesRenderer::submit(const Draw& d) {
     // THE ATTRIBUTES. A pointer captures the buffer bound WHEN IT IS SET, so
     // the uploads' and tie patches' own binds in between leave it alone: the
     // same buffer in the same layout needs nothing.
-    const GLuint buf = posed ? pvb->id : vbo_[d.geo].id;
+    const Vbo* sv = posed ? nullptr : &vbo_[d.geo];
+    const bool fromRing = sv && sv->streamed;
+    const GLuint buf = posed ? pvb->id : fromRing ? ring_ : sv->id;
     const int layout = posed ? 1 : 0;
     if (set(ds_.attrBuf != buf || ds_.attrLayout != layout)) {
         glBindBuffer(GL_ARRAY_BUFFER, buf);
@@ -1701,7 +1812,8 @@ void GlesRenderer::submit(const Draw& d) {
     }
     ++g_glesDrawsWindow;
     const double fd0 = glesClockMs();
-    glDrawArrays(GL_TRIANGLES, static_cast<GLint>(d.start), static_cast<GLsizei>(d.count));
+    glDrawArrays(GL_TRIANGLES, static_cast<GLint>(d.start + (fromRing ? sv->base : 0)),
+                 static_cast<GLsizei>(d.count));
     g_glesFrame.drawMs += glesClockMs() - fd0;
     ++g_glesFrame.draws;
     st_.drawn += static_cast<long>(d.count / 3);
@@ -1808,6 +1920,7 @@ void GlesRenderer::drawPresent(GLuint tex, int picW, int picH, int texW, int tex
 }
 
 bool GlesRenderer::presentWorld(int vy, int vh, int frameW, int frameH, int winW, int winH) {
+    notePresent();
     // The world target holds the picture in its top `vh` rows; the engine's
     // frame is `frameW x frameH` with the picture at row `vy` and black bands
     // around it. The frame's rectangle on the window is fitted first, then cut
@@ -1825,6 +1938,7 @@ bool GlesRenderer::presentWorld(int vy, int vh, int frameW, int frameH, int winW
 }
 
 bool GlesRenderer::presentSurface(const Surface& s, int winW, int winH) {
+    notePresent();
     // A frame the CPU composed - an interface screen, the HUD, a movie - is
     // already 565 and is uploaded as 565: `GL_UNSIGNED_SHORT_5_6_5` is core
     // GLES2, so no conversion touches the pixels on the way.
@@ -1863,6 +1977,7 @@ bool GlesRenderer::presentSurface(const Surface& s, int winW, int winH) {
 
 bool GlesRenderer::presentOverlay(const Surface& s, const unsigned char* mask, const unsigned char* maskRows,
                                   const float fade[4], int vy, int vh, int winW, int winH) {
+    notePresent();
     if (!maskTex_) {
         if (!overlay_) overlay_ = link(kPresentVert, kOverlayFrag, {{0, "aPos"}});
         if (!overlay_) return false;

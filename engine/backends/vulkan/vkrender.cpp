@@ -331,6 +331,11 @@ private:
 
     std::map<const omk::Geometry*, std::pair<VkBuffer, VkDeviceMemory>> vbo_;
     std::map<const omk::Geometry*, std::size_t> vboN_;
+    // ...and how many corners its buffer HOLDS, which a geometry that changes
+    // size every frame (the particles) keeps above what it uses, so it refills
+    // in place instead of freeing and allocating device memory every frame
+    // (2026-09-30, the same fault the GLES ring answers on the Vita)
+    std::map<const omk::Geometry*, std::size_t> vboCap_;
     std::map<const omk::Geometry*, std::uint64_t> vboRev_;
     // THE DEPTH TIE, resolved at SUBMIT (raster.cpp `kDepthTie` has the
     // reading). Two faces on the same four vertices in opposite winding - the
@@ -1808,12 +1813,15 @@ bool VulkanRenderer::uploadGeometry(const omk::Geometry* g) {
     const auto seen = vboRev_.find(g);
     if (vbo_.count(g) && seen != vboRev_.end() && seen->second == g->revision)
         return true;
+    bool grow = false;
     if (vbo_.count(g)) {
         // Same object, new vertices. The previous frame has already been
         // waited on (present ends with `vkWaitForFences`), so the buffer is
         // not in flight and can be refilled in place when it still fits.
         const auto it = vboN_.find(g);
-        if (it != vboN_.end() && it->second == g->corners.size()) {
+        const auto capIt = vboCap_.find(g);
+        const std::size_t cap = capIt != vboCap_.end() ? capIt->second : (it != vboN_.end() ? it->second : 0);
+        if (it != vboN_.end() && cap >= g->corners.size()) {
             // ...and when the geometry says which corners moved since the
             // revision this buffer holds, only those are written
             // (`Geometry::dirtyCorners`, todo/optimization.md step 8): a moving
@@ -1822,7 +1830,8 @@ bool VulkanRenderer::uploadGeometry(const omk::Geometry* g) {
             // back the ones that are no longer losers.
             static const bool noDirty = std::getenv("OMK_NO_DIRTY") != nullptr;
             const bool partial = !noDirty && seen != vboRev_.end() && g->dirtyTo != 0 &&
-                                 g->dirtyTo == g->revision && seen->second == g->dirtyFrom;
+                                 g->dirtyTo == g->revision && seen->second == g->dirtyFrom &&
+                                 it->second == g->corners.size();
             void* p = nullptr;
             const VkDeviceSize bytes = g->corners.size() * sizeof(GpuVert);
             if (vkMapMemory(dev_, vbo_[g].second, 0, bytes, 0, &p) == VK_SUCCESS) {
@@ -1844,12 +1853,14 @@ bool VulkanRenderer::uploadGeometry(const omk::Geometry* g) {
                 }
                 vkUnmapMemory(dev_, vbo_[g].second);
                 vboRev_[g] = g->revision;
+                vboN_[g] = g->corners.size();
                 return true;
             }
         }
         vkDestroyBuffer(dev_, vbo_[g].first, nullptr);
         vkFreeMemory(dev_, vbo_[g].second, nullptr);
         vbo_.erase(g); vboN_.erase(g); vboRev_.erase(g);
+        grow = true;                   // it has changed size once: give it room
     }
     std::vector<GpuVert> v(g->corners.size());
     for (std::size_t i = 0; i < g->corners.size(); ++i) {
@@ -1858,8 +1869,11 @@ bool VulkanRenderer::uploadGeometry(const omk::Geometry* g) {
     }
     const VkDeviceSize bytes = v.size() * sizeof(GpuVert);
     if (!bytes) return false;
+    // a first buffer is exact - a set is never re-sized - and one that has
+    // outgrown its buffer gets half as much again
+    const std::size_t capCorners = grow ? v.size() + v.size() / 2 : v.size();
     VkBuffer b; VkDeviceMemory m;
-    if (!makeBuffer(bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+    if (!makeBuffer(capCorners * sizeof(GpuVert), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                     b, m)) return false;
     void* p = nullptr;
@@ -1869,6 +1883,7 @@ bool VulkanRenderer::uploadGeometry(const omk::Geometry* g) {
     vbo_[g] = {b, m};
     g->resident.mark();
     vboN_[g] = v.size();
+    vboCap_[g] = capCorners;
     vboRev_[g] = g->revision;
     tie_[g].vboReplaced();
     return true;
@@ -2359,6 +2374,7 @@ void VulkanRenderer::geometryGone(void* self, const omk::Geometry* g) {
         had = true;
     }
     r->vboN_.erase(g);
+    r->vboCap_.erase(g);
     r->vboRev_.erase(g);
     had |= r->tie_.erase(g) > 0;
     if (had) ++r->released_;

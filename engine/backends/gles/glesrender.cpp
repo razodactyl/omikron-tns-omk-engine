@@ -93,6 +93,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -153,15 +154,26 @@ varying vec3  vCol;
 varying float vDepth;
 void main() {
     vUV = aUV / uTexSize;
+    // A TIE LOSER carries its phase moved down by 8192 (`kTieLoserPhase`): -1
+    // (no shimmer) becomes -8193, a phase p becomes p - 8192. Both decode exactly.
+    float ph = aPhase;
+    float tie = 0.0;
+    if (ph < -4096.0) { ph += 8192.0; tie = 1.0; }
     float wave = 0.0;
-    if (aPhase >= 0.0) {
+    if (ph >= 0.0) {
         // ((int(clock) >> 2) + int(phase)) & 31, with no integer operators:
         // both are non-negative, so floor(x / 4) is the shift and mod the mask
-        float i = mod(floor(floor(uShimmerClock) / 4.0) + floor(aPhase), 32.0);
+        float i = mod(floor(floor(uShimmerClock) / 4.0) + floor(ph), 32.0);
         wave = waveAt(i);
     }
     vCol = aCol + vec3(wave);
     gl_Position = uMvp * vec4(aPos, 1.0);
+    // ...and is drawn TWO 16-bit depth steps back (window depth is NDC / 2), so
+    // the earlier coincident face keeps every pixel under GL_LESS whatever the
+    // interpolation noise between the two triangulations - the engine's strict
+    // GREATER on its quantised buffer, which a later face beats only by being
+    // a whole step nearer (ASSETS 4b; `raster.cpp`'s kDepthTie is the same band)
+    gl_Position.z += tie * (4.0 / 65535.0) * gl_Position.w;
     // row 3 of uMvp is f . (world - eye): w is the view depth raster.cpp fogs on
     vDepth = gl_Position.w;
 }
@@ -400,6 +412,8 @@ static_assert(sizeof(GpuPoseVert) == 52, "the posed GLES vertex is 52 bytes");
 GpuVert gpuVert(const omk::Corner& c) {
     return {c.x, c.y, c.z, c.u, c.v, c.r, c.g, c.b, c.phase};
 }
+// how a baked tie loser's corner is marked (the scene shader decodes it)
+constexpr float kTieLoserPhase = 8192.0f;
 
 constexpr GLuint kAttrPos = 0, kAttrUV = 1, kAttrCol = 2, kAttrPhase = 3, kAttrSlot = 4,
                  kAttrNormal = 5;
@@ -638,6 +652,20 @@ private:
     // [lo, hi] of `g` about to be uploaded - so the buffer keeps holding every
     // loser degenerate and `resolveTies` only writes what is new.
     void foldTies(const Geometry& g, std::vector<GpuVert>& v, std::uint32_t lo, std::uint32_t hi);
+    // THE BAKED TIE (`bakeDepthTie`): each geometry's loser triangles, sorted,
+    // decided once from its full draw order. A baked geometry skips
+    // `resolveTies` - so it may stream - and its losers are MARKED in every
+    // upload (`foldBias`) rather than degenerated.
+    std::unordered_map<const Geometry*, std::vector<std::uint32_t>> baked_;
+    void foldBias(const Geometry& g, GpuVert* v, std::uint32_t lo, std::uint32_t hi) const;
+public:
+    bool bakeDepthTie(const Geometry* g, std::span<const Draw> order) override;
+    long bakedLosers() const {
+        long n = 0;
+        for (const auto& [g, l] : baked_) n += static_cast<long>(l.size());
+        return n;
+    }
+private:
     void destRect(int picW, int picH, int winW, int winH, float out[4]) const;
     // One picture onto the window: `picW x picH` pixels of a `texW x texH`
     // texture, into the NDC rectangle `dst`.
@@ -756,6 +784,7 @@ private:
             had = true;
         }
         had |= r->tie_.erase(g) > 0;
+        had |= r->baked_.erase(g) > 0;
         had |= r->poseTie_.erase(g) > 0;
         // a CPU-posed copy is itself uploaded: erasing it notifies again, for
         // its own address, which the lines above then release
@@ -1204,6 +1233,7 @@ bool GlesRenderer::streamToRing(const Geometry* g, Vbo& vb) {
     std::vector<GpuVert>& v = up_;
     v.resize(n);
     for (std::size_t k = 0; k < n; ++k) v[k] = gpuVert(g->corners[k]);
+    foldBias(*g, v.data(), 0, static_cast<std::uint32_t>(n - 1));
     const std::size_t base = static_cast<std::size_t>(ringRegion_) * kRingCorners + ringUsed_;
     glBindBuffer(GL_ARRAY_BUFFER, ring_);
     ds_.attrBuf = 0;                                // the draws re-point their attributes
@@ -1244,7 +1274,7 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
         it->second.rev = 0;
     }
     if (g->corners.empty()) return false;
-    if (streamOn_ && !tieOn_ && it != vbo_.end() && it->second.lastWhole + 1 >= frameSeq_ &&
+    if (streamOn_ && (!tieOn_ || baked_.count(g)) && it != vbo_.end() && it->second.lastWhole + 1 >= frameSeq_ &&
         !(g->dirtyTo != 0 && g->dirtyTo == g->revision && it->second.rev == g->dirtyFrom &&
           it->second.n == g->corners.size()) &&
         streamToRing(g, it->second))
@@ -1334,6 +1364,7 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
                     // must write it degenerate again, or the buffer stops
                     // matching `applied_` - see `foldTies`
                     foldTies(*g, v, lo, hi);
+                    foldBias(*g, v.data(), lo, hi);
                     patchArrayBuffer(lo * sizeof(GpuVert), v.size() * sizeof(GpuVert), v.data());
                     g_glesFrame.uploadBytes += static_cast<long>(v.size() * sizeof(GpuVert));
                 }
@@ -1343,6 +1374,7 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
             v.resize(g->corners.size());
             for (std::size_t k = 0; k < v.size(); ++k) v[k] = gpuVert(g->corners[k]);
             foldTies(*g, v, 0, static_cast<std::uint32_t>(v.size() - 1));
+            foldBias(*g, v.data(), 0, static_cast<std::uint32_t>(v.size() - 1));
             glBufferSubData(GL_ARRAY_BUFFER, 0,
                             static_cast<GLsizeiptr>(v.size() * sizeof(GpuVert)), v.data());
             g_glesFrame.uploadBytes += static_cast<long>(v.size() * sizeof(GpuVert));
@@ -1360,7 +1392,8 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
             glGetBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(got.size() * sizeof(GpuVert)), got.data());
             long bad = 0; std::size_t first = ~std::size_t{0};
             for (std::size_t k = 0; k < got.size(); ++k) {
-                const GpuVert w = gpuVert(g->corners[k]);
+                GpuVert w = gpuVert(g->corners[k]);
+                foldBias(*g, &w, static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(k));
                 if (std::memcmp(&w, &got[k], sizeof w) != 0) { ++bad; if (first == ~std::size_t{0}) first = k; }
             }
             if (bad)
@@ -1379,6 +1412,7 @@ bool GlesRenderer::uploadGeometry(const Geometry* g) {
     vb.lastWhole = frameSeq_;
     v.resize(g->corners.size());
     for (std::size_t k = 0; k < v.size(); ++k) v[k] = gpuVert(g->corners[k]);
+    foldBias(*g, v.data(), 0, static_cast<std::uint32_t>(v.size() - 1));
     glBindBuffer(GL_ARRAY_BUFFER, vb.id);
     // DYNAMIC: a posed body rewrites its buffer every frame. What vitaGL does
     // with a buffer the GPU may still be reading is the open question the
@@ -1418,6 +1452,50 @@ void GlesRenderer::foldTies(const Geometry& g, std::vector<GpuVert>& v,
     }
 }
 
+// `v` holds corners [lo, hi] of `g`; the baked losers among them are marked.
+void GlesRenderer::foldBias(const Geometry& g, GpuVert* v, std::uint32_t lo, std::uint32_t hi) const {
+    const auto it = baked_.find(&g);
+    if (it == baked_.end() || it->second.empty()) return;
+    const std::vector<std::uint32_t>& L = it->second;
+    for (auto t = std::lower_bound(L.begin(), L.end(), lo / 3); t != L.end() && 3 * *t <= hi; ++t)
+        for (std::uint32_t j = 0; j < 3; ++j) {
+            const std::uint32_t c = 3 * *t + j;
+            if (c >= lo && c <= hi) v[c - lo].phase -= kTieLoserPhase;
+        }
+}
+
+// THE TIE DECIDED ONCE. The same `DepthTie` the per-frame path runs, walked
+// once over the geometry's whole draw order: its losers are the faces an
+// earlier depth-writing face already claimed, which is a property of the
+// order and the positions, not of the frame. Two things differ from settling
+// it per frame, and both are the engine's behaviour rather than a departure:
+// a loser is drawn one step back instead of removed, so where its winner is
+// CULLED it still shows - as the engine shows it, having nothing in front -
+// and a face that moves off its winner (a door leaf) still draws, the step
+// back changing nothing where nothing is coincident.
+bool GlesRenderer::bakeDepthTie(const Geometry* g, std::span<const Draw> order) {
+    if (!tieOn_ || !g) return false;
+    static const bool noBake = std::getenv("OMK_NO_TIE_BAKE") != nullptr;
+    if (noBake) return false;
+    DepthTie t;
+    std::vector<std::size_t> losers, restore;
+    for (const Draw& d : order)
+        if (d.geo == g) t.resolve(*g, d.start, d.count, d.blend == Blend::Opaque, losers, restore);
+    std::vector<std::uint32_t> L(losers.begin(), losers.end());
+    std::sort(L.begin(), L.end());
+    L.erase(std::unique(L.begin(), L.end()), L.end());
+    baked_[g] = std::move(L);
+    // what the buffer holds is the old decision: degenerated faces, or none
+    // marked. Forget both, so the next upload is whole and marked.
+    tie_.erase(g);
+    if (auto v = vbo_.find(g); v != vbo_.end()) v->second.rev = ~std::uint64_t{0};
+    static const bool tieLog = std::getenv("OMK_TIE_LOG") != nullptr;
+    if (tieLog)
+        std::printf("[tie] gles: baked %zu losers over %zu draws on geometry %p\n",
+                    baked_[g].size(), order.size(), static_cast<const void*>(g));
+    return true;
+}
+
 void GlesRenderer::resolveTies(const Draw& d, Vbo& vb) {
     // THE DEPTH TIE, the Vulkan backend's rule (`o3de/depthtie.h`): the engine
     // shows the FIRST-drawn of two coincident faces, a GPU's float compare
@@ -1427,6 +1505,7 @@ void GlesRenderer::resolveTies(const Draw& d, Vbo& vb) {
     // switch (`setDepthTie`, `OMK_NO_TIE=1`), on until that is answered.
     if (!tieOn_) return;
     const Geometry* g = d.geo;
+    if (baked_.count(g)) return;             // settled once, drawn back (`bakeDepthTie`)
     auto& t = tie_[g];
     std::vector<std::size_t>& losers = losers_;
     std::vector<std::size_t>& restore = restore_;

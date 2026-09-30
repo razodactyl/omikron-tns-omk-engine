@@ -5511,6 +5511,8 @@ int main(int argc, char** argv) {
         // set finishes loading (`sub_443300` in `sub_4195C0`) and left only on
         // unload or eviction (`sub_443320`). So a hidden set is still SOLID.
         bool shown = false;
+        // the `worldGen` its depth tie was last baked for (`bakeDepthTie`)
+        unsigned tieBakedGen = ~0u;
         omk::Geometry geo;
         std::vector<omk::Texture> tex;
         omk::MirrorPlane mirror;
@@ -5584,6 +5586,7 @@ int main(int argc, char** argv) {
     std::array<WorldSlot, 2> worldSlots;
     std::string worldSet;            // the ACTIVE slot's stem - the set under his feet
     std::size_t worldTexBase[2] = {0, 0};   // each slot's first index in `worldTex`
+    unsigned worldGen = 0;                  // bumped by every `rebuildWorld`: re-bake the tie
 
     // ------------------------------------------------------------- THE SKY
     //
@@ -5774,6 +5777,7 @@ int main(int argc, char** argv) {
     // and his `.CTL` state, position and facing survive the transition the
     // way the engine's actor does (it is one record; only the decor changes).
     const auto rebuildWorld = [&]() {
+        ++worldGen;
         worldTex.clear();
         worldDecors.clear();
         playerSoup.clear();
@@ -18022,6 +18026,24 @@ int main(int argc, char** argv) {
                 // loaded and solid, but not in the RENDER list (state 1)
                 if (!w.shown) continue;
                 const std::uint32_t texBase = static_cast<std::uint32_t>(worldTexBase[slot]);
+                // THE DEPTH TIE, decided once per set and texture base: the
+                // set's whole draw order as this loop builds it - batches in
+                // order, keyed alike, stable by key like the sort below - with
+                // nothing culled (todo/optimization.md step 29)
+                if (w.tieBakedGen != worldGen) {
+                    worldSlots[static_cast<std::size_t>(slot)].tieBakedGen = worldGen;
+                    std::vector<omk::Draw> order;
+                    order.reserve(w.geo.batches.size());
+                    for (const auto& b : w.geo.batches)
+                        order.push_back({keyOf(b.blend, b.cutout,
+                                               static_cast<std::uint32_t>(b.material) + texBase),
+                                         &w.geo, b.start, b.count, b.blend, b.cutout});
+                    std::stable_sort(order.begin(), order.end(),
+                                     [](const omk::Draw& a, const omk::Draw& b) {
+                                         return (a.bucketKey & 0x3FFFu) < (b.bucketKey & 0x3FFFu);
+                                     });
+                    world.bakeDepthTie(&w.geo, order);
+                }
                 if (w.runs.empty()) {          // no per-corner mesh: whole batches
                     for (const auto& b : w.geo.batches)
                         draws.push_back({keyOf(b.blend, b.cutout,

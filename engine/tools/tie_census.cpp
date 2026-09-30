@@ -2,7 +2,7 @@
 // THE DEPTH TIE'S COINCIDENCES, over every model - the census for baking it at
 // load (todo/optimization.md step 27).
 //
-//     tie_census <gamedata> [--list N]
+//     tie_census <gamedata> [--list N] [--model <substring>] [--order]
 //
 // The depth tie (`o3de/depthtie.h`) degenerates a face whose position set an
 // earlier depth-writing face of the same geometry already claimed, in draw
@@ -25,7 +25,12 @@
 // within one mesh, groups ACROSS meshes, and groups with a member in a
 // blended (non-depth-writing) draw. `--list N` prints the first N cross-mesh
 // groups with their meshes' names; `--model <substring>` restricts the census
-// to the models whose path contains it. Prints only; writes nothing.
+// to the models whose path contains it. Each folder line also sorts the
+// groups by CORNER ORDER against their first member: the same position
+// sequence triangle for triangle ("exact" - a rasterizer would give both the
+// same depth), the same triangles in another corner order, or another
+// diagonal; `--order` prints one line per group with its first mesh's name
+// and that class (2026-09-30, step 29). Prints only; writes nothing.
 #include "formats/mesh3do.h"
 #include "o3de/geom3do.h"
 #include "platform/datafs.h"
@@ -61,7 +66,7 @@ bool pairsAsQuad(const omk::Geometry& g, std::size_t tri) {
 struct Unit { std::size_t tri; bool quad; int mesh; bool writes; std::size_t batch; };
 
 struct Tally {
-    long models = 0, units = 0, groups = 0, members = 0, oneMesh = 0, crossMesh = 0, blended = 0;
+    long models = 0, units = 0, groups = 0, members = 0, oneMesh = 0, crossMesh = 0, blended = 0, exact = 0, reordered = 0, retri = 0;
 };
 
 }  // namespace
@@ -70,6 +75,8 @@ int main(int argc, char** argv) {
     if (argc < 2) { std::fprintf(stderr, "usage: tie_census <gamedata> [--list N]\n"); return 2; }
     int listN = 0;
     const char* only = nullptr;      // `--model <substring>`: those models alone
+    bool showOrder = false;          // `--order`: one line per group, its corner-order class
+    for (int i = 2; i < argc; ++i) if (std::strcmp(argv[i], "--order") == 0) showOrder = true;
     for (int i = 2; i + 1 < argc; ++i) {
         if (std::strcmp(argv[i], "--list") == 0) listN = std::atoi(argv[i + 1]);
         if (std::strcmp(argv[i], "--model") == 0) only = argv[i + 1];
@@ -127,10 +134,48 @@ int main(int argc, char** argv) {
                     }
                 }
                 if (anyBlend) ++T.blended;
+                // CORNER ORDER against the group's first member: the same
+                // position sequence triangle for triangle (exact), the same
+                // triangles in another corner order (reordered), or a different
+                // diagonal (retriangulated)
+                {
+                    const Unit& f = us.front();
+                    auto seq = [&](const Unit& u, int t) {
+                        std::array<P, 3> r;
+                        for (int k = 0; k < 3; ++k) r[k] = posOf(g, 3 * (u.tri + t) + k);
+                        return r;
+                    };
+                    int worst = 0;   // 0 exact, 1 reordered, 2 retriangulated
+                    for (std::size_t m = 1; m < us.size(); ++m) {
+                        const Unit& u = us[m];
+                        if (u.quad != f.quad) { worst = 2; continue; }
+                        const int n = u.quad ? 2 : 1;
+                        std::vector<std::array<P, 3>> A, B;
+                        for (int t = 0; t < n; ++t) { A.push_back(seq(f, t)); B.push_back(seq(u, t)); }
+                        if (A == B) continue;
+                        auto sorted = [](std::vector<std::array<P, 3>> v) {
+                            for (auto& t : v) std::sort(t.begin(), t.end());
+                            std::sort(v.begin(), v.end());
+                            return v;
+                        };
+                        worst = std::max(worst, sorted(A) == sorted(B) ? 1 : 2);
+                    }
+                    ++(worst == 0 ? T.exact : worst == 1 ? T.reordered : T.retri);
+                    if (showOrder) {
+                        const int m0 = us.front().mesh;
+                        std::printf("  order %s %s x%zu %s\n",
+                                    m0 >= 0 && static_cast<std::size_t>(m0) < meshes.size()
+                                        ? meshes[static_cast<std::size_t>(m0)].name : "?",
+                                    us.front().quad ? "quad" : "tri", us.size(),
+                                    worst == 0 ? "exact" : worst == 1 ? "reordered" : "retriangulated");
+                    }
+                }
             }
         }
-        std::printf("%s models %ld units %ld groups %ld members %ld one-mesh %ld cross-mesh %ld blended %ld\n",
-                    dir, T.models, T.units, T.groups, T.members, T.oneMesh, T.crossMesh, T.blended);
+        std::printf("%s models %ld units %ld groups %ld members %ld one-mesh %ld cross-mesh %ld blended %ld"
+                    " order exact %ld reordered %ld retriangulated %ld\n",
+                    dir, T.models, T.units, T.groups, T.members, T.oneMesh, T.crossMesh, T.blended,
+                    T.exact, T.reordered, T.retri);
     }
     return 0;
 }

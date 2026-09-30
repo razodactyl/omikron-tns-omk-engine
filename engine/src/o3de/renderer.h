@@ -295,6 +295,16 @@ public:
     // software reference and Vulkan answer no, and the frontend poses on the
     // CPU for them, as it always has.
     virtual bool posesBodies() const { return false; }
+    // THE DEPTH TIE, SETTLED ONCE (todo/optimization.md step 29). `order` is
+    // every draw of `g` a frame could submit, UNCULLED, in the order the frame
+    // submits them (stable by bucket key). A backend that answers true has
+    // decided from it, once, which faces lose the engine's strict test to an
+    // earlier coincident face, and draws those one depth step BACK from then
+    // on instead of settling the tie per frame - the frontend calls this again
+    // whenever the order can change (a set loaded, a texture base moved).
+    // The software reference has its own tie band and Vulkan settles it per
+    // frame, so both keep the default.
+    virtual bool bakeDepthTie(const Geometry* /*g*/, std::span<const Draw> /*order*/) { return false; }
     // How many lights a posed draw may carry (`Draw::vertexLights`).
     virtual int maxVertexLights() const { return 0; }
     // Whether the backend DRAWS two enhancements the frontend prepares for it:

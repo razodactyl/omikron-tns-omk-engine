@@ -15152,6 +15152,85 @@ def c_engine_gles_state_cache():
         "lit picture; pixels differing cache-on and on a second frame"
 
 
+def c_engine_gles_tie_bake():
+    r"""THE DEPTH TIE THE ENGINE'S WAY: decided ONCE, drawn one step back
+    (todo/optimization.md step 29).
+
+    The engine gets first-drawn-wins for free: both sides of a shop sign are
+    submitted (`CULLMODE = NONE`) and its strict `GREATER` on a quantised
+    z-buffer lets a later coincident face win a pixel only by being a whole
+    step nearer, which the 2e-7 of noise between the two sides'
+    triangulations never is (ASSETS 4b). A GPU's 16-bit `GL_LESS` is the same
+    compare but its rounding boundaries still fall inside that noise, so with
+    the tie off (`--no-tie`) the reader saw the dots, re-rolled every frame.
+
+    The port settled it per frame instead - re-deciding every face against its
+    coincident rivals and degenerating the losers in the vertex buffer - which
+    cost 0.5 ms a frame standing at the reader's sign and 4.4 ms while turning
+    (M3, 2026-09-30). `bakeDepthTie` takes the set's whole draw order once
+    (batches keyed and stable-sorted as the frame sorts them, nothing culled),
+    runs the same `DepthTie` over it, and MARKS the losers; the scene shader
+    draws a marked corner two 16-bit steps back - the engine's band, the one
+    `raster.cpp`'s kDepthTie reconstructs. A loser whose winner is culled or
+    has moved away still draws, as it does in the engine.
+
+    Asserted: the bake finds Anekbah's 248 losers (the Vulkan pass's count);
+    walking and turning past the signs, every sampled frame of the baked run
+    is BYTE-IDENTICAL to the per-frame tie's (`OMK_NO_TIE_BAKE=1`), and some
+    differ with no tie at all (`OMK_NO_TIE=1`) - the flicker is really there to
+    be settled. Measured 2026-09-30 over 179 frames of this walk: 179 / 179
+    identical, 136 different with no tie.
+
+    SHOWN TO FAIL, 2026-09-30: the shader's step back removed (`tie *` ->
+    `0.0 *`) - the losers marked but drawn in place - leaves the bake at 248
+    and turns it red, `(248, False, False)`: the baked frames were then
+    byte-identical to the NO-TIE run's, 0 of 14 differing, which is the
+    flicker back. The file was diffed after the edit and rebuilt after the
+    restore.
+    """
+    import platform, tempfile, shutil
+    if platform.system() != "Darwin":
+        return ("skipped",), ("skipped",), "the GLES viewer is checked on macOS"
+    eng = os.path.join(ROOT, "engine")
+    save = os.path.join(ROOT, "traces", "save-appart.bin")
+    if not os.path.isdir(eng) or not os.path.exists(save) or \
+            not os.path.exists(omkpaths.data("MESHES/DECORS/ANEKBAH.3DO")):
+        return ("skipped",), ("skipped",), "engine/, the save or ANEKBAH.3DO absent"
+    b = subprocess.run(["make", "-s", "play-gles"], cwd=eng, capture_output=True, text=True)
+    binp = os.path.join(eng, "build", "omk-play-gles")
+    if b.returncode != 0 or not os.path.exists(binp):
+        return ("skipped",), ("skipped",), "omk-play-gles did not build (SDL absent?)"
+    tmp = tempfile.mkdtemp()
+    try:
+        frames, baked = {}, None
+        for tag, extra in (("bake", {}), ("rt", {"OMK_NO_TIE_BAKE": "1"}),
+                           ("none", {"OMK_NO_TIE": "1"})):
+            d = os.path.join(tmp, tag)
+            os.makedirs(d)
+            env = dict(os.environ, OMK_NO_GPU_PRESENT="1", OMK_TIE_LOG="1", **extra)
+            r = subprocess.run([binp, omkpaths.data_root(), os.path.join(ROOT, "tables"),
+                                "--save", save, "--area", "0", "--stand", "6219,0,-8490,199",
+                                "--hold", "k200*30,k203*30", "--frames", "70",
+                                "--snaps", d, "--snap-every", "5"],
+                               capture_output=True, text=True, env=env, timeout=600)
+            if tag == "bake":
+                m = re.search(r"^\[tie\] gles: baked (\d+) losers", r.stdout, re.M)
+                baked = int(m.group(1)) if m else None
+            frames[tag] = {f: open(os.path.join(d, f), "rb").read() for f in os.listdir(d)}
+        ks = sorted(frames["bake"])
+        # a run that wrote nothing must fail AS A RUN, not compare empty sets
+        if len(ks) < 10 or set(ks) != set(frames["rt"]) or set(ks) != set(frames["none"]):
+            return ("frames missing",), ("frames",), "the viewer wrote %d frames" % len(ks)
+        same = sum(frames["bake"][k] == frames["rt"][k] for k in ks)
+        flick = sum(frames["bake"][k] != frames["none"][k] for k in ks)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return (baked, same == len(ks), flick > 0), (248, True, True), \
+        "the losers baked over Anekbah; every sampled frame of a walk past the " \
+        "signs byte-identical to the per-frame tie's; and some different with " \
+        "no tie (%d of %d here)" % (flick, len(ks))
+
+
 def c_engine_tie_census():
     r"""The depth tie's coincidences over every model - the census for baking
     the tie at load (todo/optimization.md step 27).
@@ -15164,7 +15243,19 @@ def c_engine_tie_census():
     objects 99 / 99 / 0. Anekbah 169 / 165 / 4 - the four are door leaves
     (`Ported30`/`Porteg30` and three more pairs), which move. That is what
     rules out a pure load-time answer: a group across two meshes that move
-    apart can stop being coincident, and its loser must draw again.
+    apart can stop being coincident, and its loser must draw again - which
+    is why the bake (step 29) draws a loser a depth step BACK rather than
+    removing it: moved off its winner it still draws.
+
+    AND BY CORNER ORDER (2026-09-30), which is what rules out getting the
+    tie for free from the rasterizer. Two coincident faces fed in the SAME
+    corner order would interpolate bit-identical depth and a strict test would
+    reject the second everywhere; but of the sets' 5361 groups only 1115 are
+    that, 2986 are the same triangles in another corner order, and 1260 split
+    on another DIAGONAL - 21 of the 28 groups on Anekbah's shop-sign meshes among them - so
+    their depths differ by interpolation noise and a GPU's rounding boundaries
+    fall inside it. Hence `engine: gles tie bake`: the losers decided once and
+    drawn a step back.
 
     SHOWN TO FAIL, 2026-09-29: the quad pairing switched off (every unit a
     triangle) turns it red - sets 6787 / 4624 / 2163, characters 520 / 335 /
@@ -15182,7 +15273,8 @@ def c_engine_tie_census():
         return ("skipped",), ("skipped",), "MESHES absent"
     r = subprocess.run([binp, omkpaths.data_root()], capture_output=True, text=True)
     rows = re.findall(r"^MESHES/(\w+) models (\d+) units (\d+) groups (\d+) members (\d+) "
-                      r"one-mesh (\d+) cross-mesh (\d+) blended (\d+)$", r.stdout, re.M)
+                      r"one-mesh (\d+) cross-mesh (\d+) blended (\d+) order exact (\d+) "
+                      r"reordered (\d+) retriangulated (\d+)$", r.stdout, re.M)
     a = subprocess.run([binp, omkpaths.data_root(), "--model", "Anekbah.3DO"],
                        capture_output=True, text=True)
     an = re.search(r"^MESHES/DECORS models 1 units \d+ groups (\d+) members \d+ one-mesh (\d+) "
@@ -15190,12 +15282,15 @@ def c_engine_tie_census():
     # a parse that reads nothing must fail AS A PARSE, not answer
     if len(rows) != 3 or not an:
         return ("unparsed",), ("parsed",), "tie_census's output format changed"
-    got = tuple((d, int(g), int(o), int(c)) for d, _m, _u, g, _mm, o, c, _b in rows) + \
+    got = tuple((d, int(g), int(o), int(c), int(e), int(ro), int(rt))
+                for d, _m, _u, g, _mm, o, c, _b, e, ro, rt in rows) + \
         (("Anekbah",) + tuple(int(x) for x in an.groups()),)
-    return got, (("DECORS", 5361, 3821, 1540), ("PERSOS", 476, 302, 174),
-                 ("OBJETS", 99, 99, 0), ("Anekbah", 169, 165, 4)), \
-        "per folder: coincident groups, those within one mesh, those across meshes; " \
-        "then Anekbah's own three"
+    return got, (("DECORS", 5361, 3821, 1540, 1115, 2986, 1260),
+                 ("PERSOS", 476, 302, 174, 10, 464, 2),
+                 ("OBJETS", 99, 99, 0, 13, 66, 20), ("Anekbah", 169, 165, 4)), \
+        "per folder: coincident groups, those within one mesh, those across meshes, " \
+        "and by CORNER ORDER against the group's first member - the same sequence, " \
+        "the same triangles reordered, another diagonal; then Anekbah's own three"
 
 
 def c_engine_geometry_release():
@@ -38985,6 +39080,7 @@ CHECKS = [
     ("tutorial one-shot",  c_tutorial_one_shot, "todo/omk-play 42"),
     ("engine: player move", c_engine_player_move, "SCRIPT_VM 63/89"),
     ("engine: sign tie",   c_engine_sign_tie,   "ASSETS 4b; todo/standing-unknowns 4"),
+    ("engine: gles tie bake", c_engine_gles_tie_bake, "todo/optimization.md step 29; ASSETS 4b"),
     ("no #define renames", c_no_define_renames, "CLAUDE.md 3"),
     ("shadow model",       c_shadow_model,      "ASSETS 4d"),
     ("effects and lights", c_effects_and_lights, "ASSETS 4c"),

@@ -1117,6 +1117,14 @@ frame driving the face, through the same data path the browser app uses:
   already claimed is degenerated — because a GPU compare cannot read its
   buffer; without that the GPU gave the SECOND face the whole sign, which is
   the "stably wrong" panel of the same report. `verify.py: engine: sign tie`.
+  **The GLES backend takes it the engine's way (2026-09-30)**: its 16-bit
+  `GL_LESS` is the engine's compare, but 21 of the 28 coincident groups on
+  the sign meshes split on another DIAGONAL, so the two depths differ by
+  noise and a rounding boundary still falls inside it - dots with the tie off.
+  The losers are decided ONCE from the set's whole draw order and drawn two
+  16-bit steps BACK, which is the band a later face must beat in the engine;
+  byte-identical to the per-frame tie over a walk past the signs, at no
+  per-frame cost (`verify.py: engine: gles tie bake`, todo/optimization.md 29).
 
   That is why "material-id order looks right" — it was never an accident of
   numbering. It is the slot order, seen through the one case where the two

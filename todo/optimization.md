@@ -1956,6 +1956,68 @@ frames; (b), (c) and (d)'s shares are pixel/corner counts, not profiles; (d)'s
 7 ms a section is ~40x the M3's figure and not explained by arithmetic alone -
 record `motionPatch0` (declared at `play.cpp:6497`, never recorded) first.
 
+### 29. The depth tie the ENGINE'S way - decided once, drawn a step back (2026-09-30, M3)
+
+The reader's report, and the brief: *"I already did many runs with --no-tie,
+it has the flickering issue. Do it the way the original does."*
+
+**Why the GPU's own compare is not enough, measured.** The GLES backend
+already has the original's compare: a 16-bit buffer and a strict test
+(`GL_LESS` against the engine's reversed `GREATER`). The two would give the
+tie for free if the coincident faces interpolated BIT-IDENTICAL depth, which
+a rasterizer does for the same triangle fed in the same corner order. The
+census (`tie_census`, new order classes) says they mostly are not: of the
+sets' 5361 groups 1115 are the same sequence, 2986 the same triangles in
+another corner order and **1260 another diagonal**, 21 of the 28 groups on
+Anekbah's shop-sign meshes among them. Their depths differ by interpolation
+noise, the 16-bit rounding boundaries fall inside it here and there, and the
+later face wins those pixels: at the reader's sign with `OMK_NO_TIE=1`, 2 to
+26 dots a frame, re-rolled, in 58 of 59 frames standing and 136 of 179
+walking.
+
+**What the engine does that the GPU does not**: a later face wins a pixel
+only by being a whole buffer step nearer - `raster.cpp`'s `kDepthTie` band
+reconstructs exactly that. So the loser is drawn **one step back**:
+
+* `Renderer::bakeDepthTie(geo, order)` - the frontend hands the backend a
+  set's WHOLE draw order once (its batches keyed and stable-sorted as the
+  frame sorts them, nothing culled), on every `rebuildWorld` (`worldGen`);
+* the GLES backend runs the same `DepthTie` over it once and MARKS the losers'
+  corners in the upload (`foldBias`: phase moved down by 8192, decoded
+  exactly in the scene shader), and the shader adds two 16-bit steps of window
+  depth to a marked corner (`z += 4/65535 * w` in NDC);
+* a baked geometry skips `resolveTies` - so it may also stream (step 28's
+  ring was off while the tie was on).
+
+Stepping back instead of removing is what the census's objection to a
+load-time answer needed: a door leaf that opens off its frame still DRAWS,
+the step changing nothing where nothing is coincident; and a loser whose
+winner is culled shows, as in the engine.
+
+**Measured, same binary, env toggles** (`OMK_NO_TIE_BAKE=1` the per-frame
+tie, `OMK_NO_TIE=1` none), Anekbah at the reader's sign:
+
+| | standing, 59 frames | walking + turning, 179 frames |
+|---|---|---|
+| baked losers | 248 (the Vulkan pass's count; the per-frame tie drops 120, what survives the cull) | 248 |
+| frames byte-identical to the per-frame tie | **59 / 59** | **179 / 179** |
+| frames differing with no tie | 58 | 136 |
+| tie CPU a frame (mean of 60) | 0.5 ms -> **0.0** | up to 4.4 ms (the turn) -> **0.0** |
+| tie buffer patches a frame | 6 -> 0 | - |
+
+`verify.py: engine: gles tie bake` (4 s): 248 baked, a 70-frame walk
+byte-identical to the per-frame tie, some frames different without it.
+Shown to fail with the shader's step removed: `(248, False, False)`, the
+baked frames then equal to the no-tie run's.
+
+**Not done**: the Vulkan backend still settles the tie per frame (the same
+`bakeDepthTie` would serve it, with a depth offset in its vertex stage);
+bodies keep the posed tie (resolved once on the rest geometry already); a
+coincidence CREATED by motion is not baked, as it was not before. **The
+console has not run it**: the Vita build takes the same backend and its
+shader cache re-keys on the changed source, but the tie's console cost and
+the look of the signs on its depth buffer are for the reader.
+
 ## What is NOT in scope
 
 * The software renderer's speed. It is the reference and a comparison tool;

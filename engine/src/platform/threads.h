@@ -134,4 +134,35 @@ private:
     std::shared_ptr<State> state_;
 };
 
+// ONE PIECE OF WORK IN THE BACKGROUND (2026-09-30) - `FileFetch`'s shape for
+// work that is more than a read: `work` starts at once on a thread of its own
+// and `wait` returns when it has finished. It is for a LOAD the frame can run
+// on without - a set's file read and built while the game's own load state
+// machine counts its slices (`Session::loadSlicesLeft`), as the original reads
+// a set one 128 KB chunk a frame (`sub_41F320`) and draws on meanwhile.
+//
+// The rules are the pool's, stated for one job: `work` must touch nothing the
+// calling thread touches until `wait` has returned (it owns its inputs and its
+// outputs), and WHEN its result is used must not depend on when it finished -
+// the caller picks the frame and waits there. Dropping a job that is still
+// running does not wait for it; whatever `work` captured lives until it ends.
+// With `OMK_THREADS 0`, or when the platform refuses the thread, the
+// constructor runs `work` itself.
+class BackgroundJob {
+public:
+    explicit BackgroundJob(std::function<void()> work);
+    ~BackgroundJob();
+    BackgroundJob(const BackgroundJob&) = delete;
+    BackgroundJob& operator=(const BackgroundJob&) = delete;
+    // Whether the work has finished (never blocks).
+    bool ready() const;
+    // Returns once the work has finished.
+    void wait();
+    // Whether the work ran on a thread of its own rather than in the constructor.
+    bool threaded() const;
+    struct State;
+private:
+    std::shared_ptr<State> state_;
+};
+
 }  // namespace omk

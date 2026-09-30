@@ -398,4 +398,69 @@ std::vector<std::byte> FileFetch::take() {
     return out;
 }
 
+// ------------------------------------------------------------ BackgroundJob
+struct BackgroundJob::State {
+    std::function<void()> work;
+    std::atomic<bool> done{false};
+    bool threaded = false;
+    void run() {
+        work();
+        work = nullptr;                      // what it captured goes with it
+        done.store(true, std::memory_order_release);
+    }
+};
+
+#if OMK_THREADS && defined(__vita__)
+namespace {
+int jobMain(SceSize, void* argp) {
+    auto* held = *static_cast<std::shared_ptr<BackgroundJob::State>**>(argp);
+    (*held)->run();
+    delete held;
+    return sceKernelExitDeleteThread(0);
+}
+}  // namespace
+#endif
+
+BackgroundJob::BackgroundJob(std::function<void()> work)
+    : state_(std::make_shared<State>()) {
+    state_->work = std::move(work);
+#if OMK_THREADS && defined(__vita__)
+    // one priority step below the game, like the fetch; a megabyte of stack,
+    // because the work is a loader and not a read
+    const SceUID t = sceKernelCreateThread("omk_job", jobMain, 0x10000110,
+                                           1024 * 1024, 0, kVitaAffinity, nullptr);
+    auto* held = new std::shared_ptr<State>(state_);
+    state_->threaded = true;
+    if (t < 0 || sceKernelStartThread(t, sizeof held, &held) < 0) {
+        if (t >= 0) sceKernelDeleteThread(t);
+        delete held;
+        state_->threaded = false;
+        state_->run();                       // no thread: do it now
+    }
+#elif OMK_THREADS
+    state_->threaded = true;
+    std::thread([s = state_] { s->run(); }).detach();
+#else
+    state_->run();
+#endif
+}
+
+BackgroundJob::~BackgroundJob() = default;
+
+bool BackgroundJob::ready() const {
+    return state_->done.load(std::memory_order_acquire);
+}
+
+bool BackgroundJob::threaded() const { return state_->threaded; }
+
+void BackgroundJob::wait() {
+    while (!state_->done.load(std::memory_order_acquire)) {
+#if OMK_THREADS && defined(__vita__)
+        sceKernelDelayThread(1000);
+#elif OMK_THREADS
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
+    }
+}
+
 }  // namespace omk

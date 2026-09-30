@@ -2064,6 +2064,77 @@ outside the particles and the shadow quads: 1626 corners (the player) and 864
   the bit (`sub_41D3F0` case 3, on a decor slot's node); who sets it on an
   actor is not read. Read that before building a pose cache on it.
 
+### 31. A set prepared while the game streams it, as the original reads it (2026-09-30, M3)
+
+Row f of step 28: an area change was 1-2.5 s over 2-3 frames on the console.
+
+**The original, read** (`05_sys.c`, `01_file.c`):
+* `sub_41EC20(buf, size, callback, arg)` queues a read - 64 requests of 16
+  bytes at `0x4E91D0`, one open file; `sub_41F320`, called once a frame from
+  `Game_Tick`, reads ONE `ElementSize` piece of the current request and calls
+  its callback when the request is whole; `sub_41EFA0` says whether the queue
+  is drained. `sub_41ECB0` is the same queue drained in a loop - what a read
+  does in mode 0.
+* `Music_SetFadeMode` (0x0041EFF0) is misnamed: it is the async MODE -
+  `dword_4E91C0`, 1 = 0x20000 a frame, 2 = 0x10000. A rename is owed.
+* `Area_TickLoad`: case 1 queues the SET (`Area_LoadSet`), case 2 waits for
+  it and then calls `Music_SetFadeMode(0)` - so **only the set streams**. The
+  `.SCX`, the map, the sky, the actors, the props, the `.ani` and the slider
+  track (cases 2..8) are each read whole, and all of it lands in one tick. The
+  original has a hitch there too; it spreads the big file and nothing else.
+
+**The port had the wait without the benefit.** The Session has counted the
+slices since 2026-09-02 (`loadSlicesLeft`: Anekbah's 3 MB is 17 frames), but
+`omk-play` read the `.3DO` and `.3DT`, built the geometry, decoded the textures
+and sorted four collision soups in the FIRST of those frames, then idled
+through the other sixteen.
+
+**Now** (`play.cpp`'s `SetLoad` / `prepareSet` / `askSet` / `integrateSet`,
+`platform/threads.h`'s new `BackgroundJob`): that work - everything that is a
+function of the two files' bytes - runs on a thread of its own while the
+slices count down, and the set enters the world on the frame BEFORE the last
+slice is served, so it is there when cases 2..9 run and the frame loop binds
+its emitters to the arriving `.SCX`. **When it enters is the Session's count,
+never the thread's clock**: the frame waits for the job if it must, so a run
+does not depend on how fast the machine reads. A load the engine makes in
+mode 0 (the boot, a save) or of one slice is prepared where it is asked for,
+as before. `OMK_SYNC_SETS=1` does every load that way.
+
+| walking out of the restaurant into Anekbah (M3) | on the frame | on its thread |
+|---|---|---|
+| ANEKBAH asked / in the world, frame | 3 / 3 | 3 / **19** |
+| read 3038 KB, geometry, textures, soups, the rest (ms) | 0.6, 4.7, 5.3, 5.6, 0.3 on frame 3 | the same 17 ms, off the frame |
+| the frame's wait for the job | - | 0.0 ms |
+| emitters bound to `anekbah.SCX`, frame | 20 | 20 |
+
+Byte-identical frames with `OMK_SYNC_SETS=1` and without: the software viewer
+at frames 22 and 90 of that walk, GLES at 60 and 120, and the Impasse sequence
+at 1500; the two logs differ only in the frame the set arrives and in timings.
+Green over it: `the sky`, `engine: airlock walk`, `walk-in scene`, `tunnel door
+walk`, `shop door`, `lift doors`, `threaded bodies`, `gles tie bake`. What is
+NOT the same as before, and is the original's: for the slice frames the
+arriving set's floor and walls are not in the world yet.
+
+Two things found on the way, both fixed:
+* **a new sky rebuilt the whole world** - both sets' soups and grids again and
+  a new `worldGen`, which bakes the depth tie again - on the frame after the
+  set that names it had just done all of that. It is a new section of the
+  texture pool and nothing else (83 sky pixels in the walk's frame 90, equal
+  to the build before);
+* **a set that does not resolve was asked for every frame**, with a world
+  rebuild each time (`want != w.stem` can never settle when nothing loads) -
+  seen as ninety `world: rebuilt` lines in a run pointed at no data. A slot now
+  remembers what it was ASKED for.
+
+**For the console log**: `set load: NAME - N KB read in X ms, geometry, textures,
+soups, the rest; asked at frame A, in at frame B - prepared on its own thread,
+the frame waited W ms` and `world: rebuild - soups and grids X ms, the texture
+pool Y ms`. If W is large the sixteen frames were not enough and the wait is
+the stall that is left; what then remains on the arrival frames is the rebuild
+(1.1-1.3 ms on the M3 for Anekbah beside the restaurant), the texture uploads,
+the tie bake and the Session's cases 2..9 (`model load:` lines) - the part the
+original does not spread either. Not run on a console.
+
 ## What is NOT in scope
 
 * The software renderer's speed. It is the reference and a comparison tool;

@@ -5715,24 +5715,60 @@ int main(int argc, char** argv) {
     int  lastCamera = -2;
     // One slot's decor in or out. The Geometry object stays where it is and
     // its revision climbs, so the backend refills rather than mistakes it.
-    const auto loadWorldSlot = [&](int slot, const std::string& stem, int area) {
-        WorldSlot& w = worldSlots[static_cast<std::size_t>(slot & 1)];
-        w = WorldSlot{};
-        mergedValid = false;
-        w.geo.revision = ++worldGeoRev;
-        if (stem.empty()) return;
-        const auto o = fs.resolve("MESHES/DECORS/" + stem + ".3DO");
-        if (!o) { std::printf("world: no set %s.3DO\n", stem.c_str()); return; }
-        const auto d = omk::DataFs::readPath(*o);
+    //
+    // A SET IS PREPARED OFF THE FRAME, AS THE ORIGINAL READS IT
+    // (todo/optimization.md step 31). `o3de_LoadScene` queues ONE read of the
+    // whole `.3DO` (`sub_41EC20`), `sub_41F320` serves it `ElementSize` bytes
+    // a frame from `Game_Tick` - 0x20000 after `Async_SetMode(1)` - and
+    // `Area_TickLoad` waits on `sub_41EFA0` while the game draws on. The
+    // Session has counted those frames since 2026-09-02 (`loadSlicesLeft`,
+    // Anekbah's 17), but this file read, built, decoded and sorted the whole
+    // set in the FIRST of them, so the port had the original's wait and the
+    // stall beside it. Now the work - everything below that is a function of
+    // the two files' bytes - runs on a thread of its own while the slices
+    // count down, and the set comes into the world on the frame they reach
+    // zero, which is one frame before `Area_TickLoad`'s cases 2..9 run.
+    //
+    // WHEN it comes in is the Session's count and never the thread's clock -
+    // the frame waits for the job if it must - so a run is the same run
+    // however fast the machine reads. A load the engine makes in mode 0 (the
+    // boot, a save) has no slices and is done where it is asked for, as before.
+    // `OMK_SYNC_SETS=1` does every load that way: the comparison.
+    struct SetLoad {
+        int slot = 0;
+        std::string stem;
+        int area = -1;
+        std::string path3do, path3dt;    // resolved on the frame's thread
+        WorldSlot out;                   // what the job builds; nobody else's until it is done
+        bool found = false;
+        std::size_t bytes = 0;
+        double ms[5] = {0, 0, 0, 0, 0};  // read, geometry, textures, soups, the rest
+        long askedFrame = 0;
+        std::unique_ptr<omk::BackgroundJob> job;
+    };
+    std::shared_ptr<SetLoad> setLoads[2];
+    // what each slot was last ASKED for - not `WorldSlot::stem`, which is what
+    // is IN it: a set that does not resolve is asked for once, not every frame
+    std::string slotAsked[2];
+    int slotAskedArea[2] = {-1, -1};
+    const bool syncSets = omk::envSet("OMK_SYNC_SETS");   // A/B only
+    const auto prepareSet = [](SetLoad& L) {
+        using clk = std::chrono::steady_clock;
+        const auto since = [](clk::time_point a) {
+            return std::chrono::duration<double, std::milli>(clk::now() - a).count();
+        };
+        WorldSlot& w = L.out;
+        auto t = clk::now();
+        const auto d = omk::DataFs::readPath(L.path3do);
+        std::vector<std::byte> td;
+        if (!L.path3dt.empty()) td = omk::DataFs::readPath(L.path3dt);
+        L.bytes = d.size() + td.size();
+        L.ms[0] = since(t);
         if (d.empty()) return;
-        w.stem = stem;
-        w.area = area;
+        w.stem = L.stem;
+        w.area = L.area;
+        t = clk::now();
         w.geo = omk::buildGeometry(d, omk::DrawFilter::Engine);
-        w.geo.revision = ++worldGeoRev;
-        const auto t = fs.resolve("MESHES/DECORS/" + stem + ".3DT");
-        if (t) w.tex = omk::textures(d, omk::DataFs::readPath(*t));
-        w.mirror = omk::mirrorPlane(d);
-        if (const auto mh = omk::readHeader(d)) w.lights = omk::readLights(d, *mh);
         // The runs, in submission order: batch by batch, and inside a batch
         // split wherever `cornerMesh` changes. A set whose corners carry no
         // mesh index leaves this empty, and the draw path then submits whole
@@ -5753,12 +5789,23 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        L.ms[1] = since(t);
+        t = clk::now();
+        if (!L.path3dt.empty()) w.tex = omk::textures(d, td);
+        L.ms[2] = since(t);
+        t = clk::now();
         w.soup = omk::collisionSoup(d, omk::SoupKind::Walkable, &w.soupMesh);
         w.steep = omk::collisionSoup(d, omk::SoupKind::Steep, &w.steepMesh);
         w.shotSoup = omk::collisionSoup(d, omk::SoupKind::Shot);
         w.sightSoup = omk::collisionSoup(d, omk::SoupKind::Sight);
         w.baseSoup.clear(); w.baseSteep.clear();
-        if (const auto mh = omk::readHeader(d)) w.meshes = omk::readMeshes(d, *mh);
+        L.ms[3] = since(t);
+        t = clk::now();
+        w.mirror = omk::mirrorPlane(d);
+        if (const auto mh = omk::readHeader(d)) {
+            w.lights = omk::readLights(d, *mh);
+            w.meshes = omk::readMeshes(d, *mh);
+        }
         // THE SET'S OWN EMITTERS - `Sfx_BindAmbientEffects`, the environment
         // family. Every mesh flagged 0x40000000 whose first four name bytes
         // match a section-D tag registers that binding's effect at the mesh's
@@ -5771,6 +5818,54 @@ int main(int argc, char** argv) {
         // that was about to be dropped, and the city's own `.SCX` then came up
         // with none - the Bowie sequence's fire among them (2026-09-29).
         w.emitters = omk::SceneRunner::setEmitterMeshes(d);
+        L.ms[4] = since(t);
+        L.found = true;
+    };
+    // The slot emptied and the new set's preparation started. -> whether the
+    // world lost a set by it (the rebuild is then owed at once).
+    const auto askSet = [&](int slot, const std::string& stem, int area, long frame) {
+        slot &= 1;
+        WorldSlot& w = worldSlots[static_cast<std::size_t>(slot)];
+        const bool had = !w.stem.empty();
+        w = WorldSlot{};
+        mergedValid = false;
+        w.geo.revision = ++worldGeoRev;
+        setLoads[slot].reset();          // a job still running finishes into its own state
+        slotAsked[slot] = stem;
+        slotAskedArea[slot] = area;
+        if (stem.empty()) return had;
+        const auto o = fs.resolve("MESHES/DECORS/" + stem + ".3DO");
+        if (!o) { std::printf("world: no set %s.3DO\n", stem.c_str()); return had; }
+        auto L = std::make_shared<SetLoad>();
+        L->slot = slot;
+        L->stem = stem;
+        L->area = area;
+        L->askedFrame = frame;
+        L->path3do = *o;
+        if (const auto t = fs.resolve("MESHES/DECORS/" + stem + ".3DT")) L->path3dt = *t;
+        // on a thread only when there are frames to spend on it: a load that
+        // comes in on this same frame is simply done here
+        const bool streams = !syncSets && session.loading() && session.loadingSlot() == slot &&
+                             session.loadSlicesLeft() > 1;
+        if (!streams) prepareSet(*L);
+        else L->job = std::make_unique<omk::BackgroundJob>([L, prepareSet] { prepareSet(*L); });
+        setLoads[slot] = L;
+        return had;
+    };
+    // The prepared set into its slot, on the frame's thread. -> whether it came.
+    const auto integrateSet = [&](SetLoad& L, long frame) {
+        double waited = 0.0;
+        if (L.job) {
+            const double w0 = static_cast<double>(SDL_GetPerformanceCounter());
+            L.job->wait();
+            waited = (static_cast<double>(SDL_GetPerformanceCounter()) - w0) * 1000.0 /
+                     static_cast<double>(SDL_GetPerformanceFrequency());
+        }
+        if (!L.found) return false;
+        WorldSlot& w = worldSlots[static_cast<std::size_t>(L.slot & 1)];
+        w = std::move(L.out);
+        mergedValid = false;
+        w.geo.revision = ++worldGeoRev;
         // The Vulkan one is already initialised - its swapchain had to exist
         // before the window could be presented to at all.
         if (!worldReady) {
@@ -5779,8 +5874,17 @@ int main(int argc, char** argv) {
         }
         std::printf("world: slot %d set %s (AREA %d) - %zu corners, %zu batches, "
                     "%zu textures, %zu walkable triangles%s\n",
-                    slot, stem.c_str(), area, w.geo.corners.size(), w.geo.batches.size(),
+                    L.slot, L.stem.c_str(), L.area, w.geo.corners.size(), w.geo.batches.size(),
                     w.tex.size(), w.soup.size() / 9, w.mirror.found ? ", mirror" : "");
+        std::printf("set load: %s - %zu KB read in %.1f ms, geometry %.1f, textures %.1f, "
+                    "soups %.1f, the rest %.1f; asked at frame %ld, in at frame %ld - %s, "
+                    "the frame waited %.1f ms for it\n",
+                    L.stem.c_str(), L.bytes / 1024, L.ms[0], L.ms[1], L.ms[2], L.ms[3], L.ms[4],
+                    L.askedFrame, frame,
+                    !L.job ? "prepared on the frame" :
+                    L.job->threaded() ? "prepared on its own thread" : "no thread, prepared on the frame",
+                    waited);
+        return true;
     };
     // After any slot changed: the texture pool (slot 0's first, then slot
     // 1's - a batch's material is offset by its slot's base), the decor list
@@ -5790,6 +5894,7 @@ int main(int argc, char** argv) {
     // and his `.CTL` state, position and facing survive the transition the
     // way the engine's actor does (it is one record; only the decor changes).
     const auto rebuildWorld = [&]() {
+        const double rebuild0 = static_cast<double>(SDL_GetPerformanceCounter());
         ++worldGen;
         worldTex.clear();
         worldDecors.clear();
@@ -5813,9 +5918,14 @@ int main(int argc, char** argv) {
         rebuildSteepFixedGrid();
         rebuildSteepMovingGrid();
         mergedValid = true;
+        const double rebuild1 = static_cast<double>(SDL_GetPerformanceCounter());
         world.setTextures(worldTex);
         poolSize = worldTex.size();
         ++poolComposition;   // the character and sprite sections re-append over this
+        const double hz = static_cast<double>(SDL_GetPerformanceFrequency());
+        std::printf("world: rebuild - soups and grids %.1f ms, the texture pool %.1f ms\n",
+                    (rebuild1 - rebuild0) * 1000.0 / hz,
+                    (static_cast<double>(SDL_GetPerformanceCounter()) - rebuild1) * 1000.0 / hz);
     };
 
     // ---- and now they PLAY -------------------------------------------
@@ -12456,7 +12566,7 @@ int main(int argc, char** argv) {
         // Session has in state 2 is loaded, one it took back to state 1 is
         // dropped. During a transition that is two sets at once.
         {
-            bool changed = false;
+            bool changed = false, skyChanged = false;
             for (int slot = 0; slot < 2; ++slot) {
                 const auto& rs = session.residentSlot(slot);
                 const bool shown = session.slotShown(slot) && rs.area != -1;
@@ -12470,9 +12580,21 @@ int main(int argc, char** argv) {
                 const std::string want = rs.area != -1 ? rs.set : std::string();
                 const int wantArea = rs.area;
                 WorldSlot& w = worldSlots[static_cast<std::size_t>(slot)];
-                if (want != w.stem || wantArea != w.area) {
-                    loadWorldSlot(slot, want, wantArea);
-                    changed = true;
+                if (want != slotAsked[slot] || wantArea != slotAskedArea[slot])
+                    changed |= askSet(slot, want, wantArea, n);
+                // ...and IN on the frame BEFORE the Session's last slice is
+                // served, so the set is in the world when `Area_TickLoad`'s
+                // cases 2..9 run and the frame loop binds its emitters to the
+                // arriving `.SCX` - the frame they bound on before. At once for
+                // a load the engine does not stream (mode 0) or of one slice.
+                if (setLoads[slot]) {
+                    const bool streaming = !syncSets && session.loading() &&
+                                           session.loadingSlot() == slot &&
+                                           session.loadSlicesLeft() > 1;
+                    if (!streaming) {
+                        changed |= integrateSet(*setLoads[slot], n);
+                        setLoads[slot].reset();
+                    }
                 }
                 w.shown = shown && !w.stem.empty();
                 // THE SKY IS GLOBAL AND EITHER SLOT CAN BRING IT.
@@ -12525,11 +12647,16 @@ int main(int argc, char** argv) {
                                         wantSky.c_str(), sky.base.size(), sky.tex.size(),
                                         sky.origin[0], sky.origin[1], sky.origin[2],
                                         sky.origin[1] - kSkyLift);
-                            changed = true;
+                            skyChanged = true;
                         }
                     }
                 }
             }
+            // A NEW SKY is a new section of the texture pool and nothing else:
+            // it used to take the whole rebuild below - both sets' soups and
+            // grids again, and a new `worldGen`, which bakes the depth tie
+            // again - one frame after the set that names it had just done so.
+            if (skyChanged && !changed) ++poolComposition;
             if (changed) {
                 ++poolComposition;      // the sky section of the pool changed
                 rebuildWorld();

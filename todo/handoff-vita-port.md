@@ -180,13 +180,23 @@ Vita for a while, so the next work should be provable on the Mac.
   posed by the RENDERER` and `the sky MOVED BY THE RENDERER`, and the `gles
   world` line's whole uploads.
 
+* **step 31 - a set prepared on a thread while the Session streams it**, as
+  the original reads a set one 128 KB piece a frame: the read, the geometry,
+  the texture decode and the four soups (17 ms on the M3 for Anekbah, the
+  first stall frame of an area change on the console) are off the frame, and
+  the set enters the world on the Session's count, not the thread's clock.
+  `OMK_SYNC_SETS=1` is the old way. In the next console log read `set load:`
+  (its `the frame waited W ms`) and `world: rebuild -`.
+
 **The reader's rule for this work (2026-09-30)**: the original is faster than
 the port, so **read the original's function for each task first** and take
 what it does - it found the mirror's two passes, the crowd LOD, the camera
 clock, and in step 30 that neither the player nor the sky is rewritten.
 
-**Next, in order**: the area-change stalls (async loading, the original's one
-128 KB chunk a frame - `Async_LoadDuringFrame`, row f of step 28), the voice
+**Next, in order**: what is left of an area change AFTER the set - the world
+rebuild, the texture uploads, the tie bake and the Session's cases 2..9 (the
+`.SCX`, the models), which the original does in one tick too, so there is no
+mechanism of its to take and the console log has to size them first; the voice
 line start (decode off the main thread), the start menu's whole-surface
 upload, shared sound samples. Anekbah's moving-mesh grid + patch (~12 ms, 70x
 the Mac, unexplained) waits for a console profile - and row d's fix (a moving
@@ -297,6 +307,9 @@ change touches.
 * **The Vita pool must hand out chunks, not assign them by slot** - a woken
   worker is any worker (2026-09-30, the Bowie crash). Test a pool at the job
   counts a culled frame gives it (1-2), not only at big ones.
+* **A job on its own thread** is `BackgroundJob` (`platform/threads.h`): it
+  must own its inputs and outputs, and the FRAME it is used on must come from
+  the game's state, never from when it finished - or two runs differ.
 * **The A9 has no integer DIVIDE**: a `/` by a runtime value is a library
   call. Keep it out of per-pixel loops (the overlay planes' `row`, 2026-09-29).
 * **vitaGL overflows uniform ARRAYS** - use separate `vec4`s (`uWave0..7`).

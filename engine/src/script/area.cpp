@@ -1241,6 +1241,22 @@ void Session::setObjectWait(bool on) {
     for (auto& c : ctxs_) if (c) c->vm.setObjectWaitSuspends(on);
 }
 
+// `camera.set.wait`'s travel: halved - truncating, `cdq` / `sub` / `sar` -
+// when the camera's record carries mode 4 (record +26, `word_4E6C64`).
+double Session::frameDelta() const {
+    // the frame delta in frames at 30 Hz - `flt_4C30D8` - SNAPPED to exactly 1
+    // when it is 1 to within rounding: `frameSeconds_ * 30` can come out a
+    // hair under 1, and a countdown of 110 such steps then ends a frame late
+    // - a headless run's camera moves drifted a frame per move until this
+    const double d = frameSeconds_ * 30.0;
+    return std::fabs(d - 1.0) < 1e-6 ? 1.0 : d;
+}
+
+int Session::op96Travel(int id, int travel) const {
+    const WorldCamera* c = findCamera(id);
+    return (c && c->mode == 4) ? travel / 2 : travel;
+}
+
 void Session::applyCamera(int id, int travel) {
     const WorldCamera* c = findCamera(id);
     // `Camera_FindWorld` returns 0 when no resident table has the id, and
@@ -1288,14 +1304,15 @@ void Session::tickCamera() {
             std::fprintf(stderr, "[cam] frame %ld  move to %d ENDS\n",
                          frameNo_, camTo_.id);
     if (camTravel_ <= 0) return;
-    camElapsed_ += frameSeconds_ * 30.0;
-    // LINEAR, which is the engine's curve types 0 and 2 only: `sub_418310`
-    // shapes the clock through `sub_418100`'s coefficients, and types 1, 3
-    // and 4 ease (quadratic pieces). Which type a request carries (the
-    // block's `+32`) is not traced; the ported travel is linear throughout.
+    camElapsed_ += frameDelta();
+    // LINEAR, which is what every script move is: `sub_418310` shapes the
+    // clock by a type (`sub_418100`: 0 and 2 linear, 1, 3, 4 eased), the type
+    // is op 96's `(operand 2 >> 1) & 0x10`, and all 1019 `camera.set.wait` in
+    // the game carry 1 or 3 - type 0 (`docs/CUTSCENES.md` 4b).
     const float u = camElapsed_ >= camTravel_
                         ? 1.0f
-                        : static_cast<float>(camElapsed_ / static_cast<double>(camTravel_));
+                        : static_cast<float>(camElapsed_) /
+                              static_cast<float>(camTravel_);   // in float, as it was
     // ---- BOTH ENDS ARE SOLVED TO WORLD, EVERY FRAME ------------------
     //
     // `sub_418410` (04_sys.c:4047) is the engine's interpolator and it is a
@@ -2677,7 +2694,8 @@ void Session::onCall(int i, const Call& call) {
         // is handled where it parks - so it is applied here only when the
         // interpreter ran through it.
         if (!camWait_ && !call.fields.empty())
-            applyCamera(call.fields[0], call.fields.size() >= 2 ? call.fields[1] : 0);
+            applyCamera(call.fields[0],
+                        op96Travel(call.fields[0], call.fields.size() >= 2 ? call.fields[1] : 0));
         break;
     case 126:
         // `camera.set.at_address` issues the same mode-12 request; with the
@@ -2719,7 +2737,7 @@ void Session::execute(int i) {
         // advances by the frame delta. Counting a tick a frame held the Bowie
         // sequence's script twice its music's length at ~15 fps, the camera
         // parked on each move's last frame (2026-09-30).
-        if (c->waitingForCamera > 0.0) c->waitingForCamera -= frameSeconds_ * 30.0;
+        if (c->waitingForCamera > 0.0) c->waitingForCamera -= frameDelta();
         if (c->waitingForCamera <= 0.0) c->status = 1;      // runs next frame
         return;
     }
@@ -2967,25 +2985,31 @@ void Session::execute(int i) {
             c->fightOpponent = r.fightOpponent;
             c->fightLevel = r.fightLevel;
             return;
-        case RunStatus::CameraWait:
+        case RunStatus::CameraWait: {
             // The 96 handler calls `Camera_FindWorld` FIRST and on 0 skips
             // everything (`jz loc_404CCB`): no request and no status 7, so
             // the script runs on. Only a camera some resident table has is
             // issued and held for its length - both halves of one
             // instruction, `Camera_Request` mode 12 and then status 7.
             if (!findCamera(r.camId)) break;
-            applyCamera(r.camId, r.camTravel);
+            // 96 HALVES the travel of a camera whose record says mode 4
+            // (`cmp word_4E6C64, 4` / `sar`, handler 0x404AF0) - the request's
+            // length and the park's both; 126 takes it raw. One camera in the
+            // game carries mode 4 (3769 are 12, 36 are 20).
+            const int travel = r.camWaitOp == 96 ? op96Travel(r.camId, r.camTravel) : r.camTravel;
+            applyCamera(r.camId, travel);
             // 96's subject is `Actor_Player()` twice; 126's is
             // `Address_Find(field 1)` in both pointers, so a camera whose
             // points are OFFSETS frames that address instead of the player.
             camSubjectAddress_ = (r.camWaitOp == 126) ? r.camAddress : -1;
             c->status = 7;
-            c->waitingForCamera = r.camTravel;
+            c->waitingForCamera = travel;
             // 126 has NO travel guard: a 0-frame cut still parks, and the
             // countdown at the head of this function releases it next frame -
             // one frame of hold, not none and not for ever. 96 never reaches
             // here at 0.
             return;
+        }
         default:
             // Runaway, UnknownOpcode, StackUnderflow: the script is over
             c->status = 0;

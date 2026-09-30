@@ -522,11 +522,18 @@ and the pictures fell behind the music. Both now advance by the delta
 so a headless run is unchanged, and at `--speed 2` the camera at frame k is
 where it is at frame 2k at normal speed.
 
-**Still a reconstruction**: the move's CURVE. `sub_418310` shapes the clock
-through coefficients `sub_418100` sets by a type at the request block's
-`+32` - 0 and 2 linear, 1, 3 and 4 eased with quadratic pieces - and the port
-moves linearly throughout; which type a script's request carries is not
-traced.
+**The move's CURVE is linear, and that is read, not assumed** (2026-09-30).
+`sub_418310` shapes the clock through coefficients `sub_418100` sets by a type
+at the timer block's `+32` - 0 and 2 linear (`t / D`), 1 an ease-in-out in two
+quadratic halves (`2(t/D)^2`, then `-1 + 4t/D - 2(t/D)^2`), 3 and 4 other
+shapes, 2 and 4 with a length derived from the distance and a speed. The type
+comes from the request's `+28` (`sub_414A90`), which op 96's handler
+(0x404AF0) fills with `(operand 2 >> 1) & 0x10` - and all **1019**
+`camera.set.wait` in the game carry operand 2 = 1 or 3 (AREA 593 + 185, SCENE
+129 + 111, GLOBAL 1), so every script camera move is type 0: LINEAR. The eased
+types are not reached by any script. The same handler HALVES the travel of a
+camera whose record `+26` (the port's `mode`) is 4 - one camera in the game,
+AREA 249's 4785 (3769 are mode 12, 36 mode 20) - which the port now does too.
 
 ## 5. Playing one back
 

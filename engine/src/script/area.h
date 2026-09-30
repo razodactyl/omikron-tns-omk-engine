@@ -1198,6 +1198,10 @@ public:
     const WorldCameras& cameras() const { return slots_[curSlot_].cams; }
     // `Camera_FindWorld`: slot 0's area then scene table, slot 1's, GLOBAL.
     const WorldCamera* findCamera(int id) const;
+    // op 96's travel for camera `id`: halved when its record's mode is 4
+    int op96Travel(int id, int travel) const;
+    // the frame delta in 30 Hz frames, exactly 1 at a steady 30
+    double frameDelta() const;
 
     // THE PLAYER'S WORLD POSITION, which `actor.goto_address` (73) and
     // `setPlayerPosition` set here. The actor runtime that would move him

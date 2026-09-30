@@ -832,11 +832,12 @@ public:
             float v = 0.0f;
             if (self->sHead_ < self->stream_.size()) v += self->stream_[self->sHead_++] * self->musicGain_;
             for (auto& one : self->shots_) {
-                if (one.pos >= one.pcm.size()) {
-                    if (!one.loop || one.pcm.empty()) continue;
+                const std::vector<float>& pcm = *one.pcm;
+                if (one.pos >= pcm.size()) {
+                    if (!one.loop || pcm.empty()) continue;
                     one.pos = 0;                  // a looping shot wraps
                 }
-                v += one.pcm[one.pos++] * one.gain;
+                v += pcm[one.pos++] * one.gain;
             }
             dst[i] = v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
         }
@@ -847,7 +848,7 @@ public:
             self->sHead_ = 0;
         }
         std::erase_if(self->shots_, [](const Shot& o) {
-            return !o.loop && o.pos >= o.pcm.size();   // a loop ends only on stopSound
+            return !o.loop && o.pos >= o.pcm->size();  // a loop ends only on stopSound
         });
     }
 
@@ -933,22 +934,33 @@ public:
         stream_.insert(stream_.end(), s.begin(), s.end());
     }
 
+    // Every play SHARES its samples (`Shot::pcm`): a caller's own span is
+    // copied once, BEFORE the lock, a vector is taken, and a shared sample -
+    // an effect out of the cache - costs the play nothing.
     int playSound(std::span<const float> s, bool loop = false,
                   float gain = 1.0f) override {
         if (s.empty()) return -1;
-        AudioLock lk(amx_);
-        // A cap, because a held key would otherwise stack voices without end.
-        if (shots_.size() >= 8) shots_.erase(shots_.begin());
-        const int id = nextShot_++;
-        shots_.push_back({std::vector<float>(s.begin(), s.end()), 0, id, loop, gain});
-        return id;
+        return playSound(std::make_shared<const std::vector<float>>(s.begin(), s.end()),
+                         loop, gain);
     }
 
     int playSound(std::vector<float>&& s, bool loop = false,
                   float gain = 1.0f) override {
         if (s.empty()) return -1;
+        return playSound(std::make_shared<const std::vector<float>>(std::move(s)), loop, gain);
+    }
+
+    int playSound(std::shared_ptr<const std::vector<float>> s, bool loop = false,
+                  float gain = 1.0f) override {
+        if (!s || s->empty()) return -1;
+        // what the cap pushes out is freed AFTER the lock, not under it
+        std::shared_ptr<const std::vector<float>> dropped;
         AudioLock lk(amx_);
-        if (shots_.size() >= 8) shots_.erase(shots_.begin());
+        // A cap, because a held key would otherwise stack voices without end.
+        if (shots_.size() >= 8) {
+            dropped = std::move(shots_.front().pcm);
+            shots_.erase(shots_.begin());
+        }
         const int id = nextShot_++;
         shots_.push_back({std::move(s), 0, id, loop, gain});
         return id;
@@ -1007,8 +1019,8 @@ private:
     // was re-fired by its program every cycle - wav 23 started 33 times in 521
     // frames, a 1.76 s sample overlapping itself three deep. That restart is
     // what a reader heard as "the loop feels unnatural".
-    struct Shot { std::vector<float> pcm; std::size_t pos; int id; bool loop = false;
-                  float gain = 1.0f; };
+    struct Shot { std::shared_ptr<const std::vector<float>> pcm; std::size_t pos; int id;
+                  bool loop = false; float gain = 1.0f; };
     int                 nextShot_ = 1;
     // SDL's own mutex, not `std::mutex`: on the Vita the standard library's
     // threading sits on the SDK's pthread layer, and the engine keeps to the
@@ -2977,13 +2989,14 @@ int main(int argc, char** argv) {
     // and `shots_` are not, so anything long started as a one-shot outlives
     // an area change, a music switch and a cutscene.
     const auto sfxLog = [&](const char* what, std::size_t samples, int a, int b,
-                            float gain = 1.0f, const std::vector<float>* pcm = nullptr) {
+                            float gain = 1.0f, const float* peakOf = nullptr) {
         const double secs = samples / static_cast<double>(kDeviceRate) / 2.0;
         // the PEAK of what is fed, because a reader heard the effects "very
         // low" against the music: the number says whether the source or the
-        // mix is quiet
-        float peak = 0.0f;
-        if (pcm) for (const float v : *pcm) peak = std::max(peak, std::fabs(v));
+        // mix is quiet. Measured ONCE, where the sample is converted
+        // (`SfxSample::peak`) - it was a pass over every sample on every play.
+        const float peak = peakOf ? *peakOf : 0.0f;
+        const bool pcm = peakOf != nullptr;
         if (secs >= 0.75 || pcm)
             std::printf("audio: %-14s %6.2f s  (%d, %d)  gain %.2f  peak %.3f\n",
                         what, secs, a, b, gain, static_cast<double>(peak));
@@ -4746,12 +4759,27 @@ int main(int argc, char** argv) {
     // the one library that changes - clears the cache when the resident scene
     // does (`sfxSceneWas`, checked each frame in the sounds pass), so an
     // address reused by another scene's sound never answers from the cache.
-    std::map<std::pair<const std::byte*, std::size_t>, std::vector<float>> sfxCache;
+    //
+    // ...AND SHARED WITH THE MIXER (2026-09-30): a play hands over the cache's
+    // own sample (`Frontend::playSound`'s shared form), as `Sound_Play3D`
+    // duplicates the bank's buffer rather than its memory. A sample still
+    // sounding when the scene's cache is cleared lives until its voice ends.
+    struct SfxSample {
+        std::shared_ptr<const std::vector<float>> pcm;
+        float peak = 0.0f;
+    };
+    std::map<std::pair<const std::byte*, std::size_t>, SfxSample> sfxCache;
     std::string sfxSceneWas;
-    const auto sfxPcm = [&sfxCache](std::span<const std::byte> wav) -> const std::vector<float>& {
+    const auto sfxPcm = [&sfxCache](std::span<const std::byte> wav) -> const SfxSample& {
         const auto key = std::make_pair(wav.data(), wav.size());
         auto it = sfxCache.find(key);
-        if (it == sfxCache.end()) it = sfxCache.emplace(key, wavToDevice(wav, kDeviceRate)).first;
+        if (it == sfxCache.end()) {
+            SfxSample sm;
+            auto v = std::make_shared<std::vector<float>>(wavToDevice(wav, kDeviceRate));
+            for (const float x : *v) sm.peak = std::max(sm.peak, std::fabs(x));
+            sm.pcm = std::move(v);
+            it = sfxCache.emplace(key, std::move(sm)).first;
+        }
         return it->second;
     };
     const auto shotSound = [&](long frame, int effectId, const float at[3],
@@ -4771,11 +4799,11 @@ int main(int argc, char** argv) {
             d = std::sqrt(dx * dx + dy * dy + dz * dz);
         }
         const float gain = d <= 78.0f ? 1.0f : 78.0f / std::min(d, 584.0f);
-        const auto& pcm = sfxPcm(shootRt->wavData(w));
+        const SfxSample& sm = sfxPcm(shootRt->wavData(w));
         std::printf("frame %ld: SHOT SOUND %s - effect %d sound %d '%s', %.0f from him, "
                     "gain %.2f\n", frame, what, effectId, e->sound,
                     shootRt->wavName(w).c_str(), double(d), double(gain));
-        if (!pcm.empty()) front.playSound(pcm, false, gain);
+        if (!sm.pcm->empty()) front.playSound(sm.pcm, false, gain);
     };
     struct GunFacts {
         bool ok = false;
@@ -6291,8 +6319,8 @@ int main(int argc, char** argv) {
                                 std::printf("  the hurt sound %d is not in shoot2.scx\n",
                                             shootMover.hurtSound);
                             else {
-                                const auto& pcm = sfxPcm(shootRt->wavData(w));
-                                if (!pcm.empty()) front.playSound(pcm, false, 1.0f);
+                                const SfxSample& sm = sfxPcm(shootRt->wavData(w));
+                                if (!sm.pcm->empty()) front.playSound(sm.pcm, false, 1.0f);
                             }
                         }
                         const bool shoved = player &&
@@ -7241,9 +7269,9 @@ int main(int argc, char** argv) {
                                 "library nor fight.scx\n", es.id);
                     continue;
                 }
-                const auto& pcm = sfxPcm(rt->wavData(i));
-                if (!pcm.empty()) { sfxLog("ctl-effect", pcm.size(), es.id, i, 1.0f, &pcm);
-                                    front.playSound(pcm); }
+                const SfxSample& sm = sfxPcm(rt->wavData(i));
+                if (!sm.pcm->empty()) { sfxLog("ctl-effect", sm.pcm->size(), es.id, i, 1.0f, &sm.peak);
+                                        front.playSound(sm.pcm); }
             }
         }
 
@@ -7299,7 +7327,8 @@ int main(int argc, char** argv) {
                                                 // their scene does not carry;
                                                 // `sub_48CB30` returns -1 and
                                                 // the engine plays nothing
-                const auto& pcm = sfxPcm(raw);
+                const SfxSample& sm = sfxPcm(raw);
+                const std::vector<float>& pcm = *sm.pcm;
                 if (pcm.empty()) continue;
                 // ---- POSITIONAL, because `Script_PlaySound` is 3D ------
                 //
@@ -7346,12 +7375,12 @@ int main(int argc, char** argv) {
                     }
                 }
                 sfxLog(fs.cue.loop ? "scene-LOOP" : "scene-sound",
-                       pcm.size(), fs.cue.wav, fs.object, gain, &pcm);
+                       pcm.size(), fs.cue.wav, fs.object, gain, &sm.peak);
                 if (sceneSoundDist >= 0.0f)
                     std::printf("audio:   ...at %.0f units from the nearest motion of object %d\n",
                                 static_cast<double>(sceneSoundDist), fs.object);
                 if (gain <= 0.01f) continue;      // too far to hear at all
-                const int h = front.playSound(pcm, fs.cue.loop, gain);
+                const int h = front.playSound(sm.pcm, fs.cue.loop, gain);
                 // only a LOOPING cue needs remembering - a one-shot ends by
                 // itself and the handle would go stale
                 if (h >= 0 && fs.cue.loop) {

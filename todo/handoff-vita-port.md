@@ -194,6 +194,11 @@ Vita for a while, so the next work should be provable on the Mac.
   conversation still loads on its frame. In the next console log read `line
   load:` - `read and decoded AHEAD`, and the `ms here in all`.
 
+* **step 33 - an effect's samples shared with the mixer**, as `Sound_Play3D`
+  duplicates a buffer and not its memory: a play from the cache copies
+  nothing and no longer holds the mixer's lock over a megabyte. In the next
+  console log read the `sounds` section's spikes.
+
 **The reader's rule for this work (2026-09-30)**: the original is faster than
 the port, so **read the original's function for each task first** and take
 what it does - it found the mirror's two passes, the crowd LOD, the camera
@@ -203,7 +208,8 @@ clock, and in step 30 that neither the player nor the sky is rewritten.
 rebuild, the texture uploads, the tie bake and the Session's cases 2..9 (the
 `.SCX`, the models), which the original does in one tick too, so there is no
 mechanism of its to take and the console log has to size them first; the start menu's whole-surface
-upload, shared sound samples. Anekbah's moving-mesh grid + patch (~12 ms, 70x
+upload (row o of step 28); a scene's sounds converted with its `.SCX` rather
+than on their first play; a conversation's first line. Anekbah's moving-mesh grid + patch (~12 ms, 70x
 the Mac, unexplained) waits for a console profile - and row d's fix (a moving
 set mesh drawn from rest with one matrix, as `o3de_SetNodePos` does) is now
 the same mechanism the sky uses. Open: the original draws far walkers

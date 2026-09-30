@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <set>
 #include <span>
+#include <memory>
 #include <vector>
 #include <string>
 
@@ -127,6 +128,15 @@ public:
     // pass over it on a console's memory bus (2026-09-23).
     virtual int  playSound(std::vector<float>&& s, bool loop = false, float gain = 1.0f) {
         return playSound(std::span<const float>(s), loop, gain);
+    }
+    // The same, SHARING them, which is what the engine does: `Sound_Play3D`
+    // (0x0046CDC0) plays a `DuplicateSoundBuffer` of the bank's buffer - a
+    // second voice on the SAME sample memory. An effect played from a cache
+    // was copied whole on every play, a megabyte for a three-second sample,
+    // with the mixer locked for the copy (todo/optimization.md step 33).
+    virtual int  playSound(std::shared_ptr<const std::vector<float>> s, bool loop = false,
+                           float gain = 1.0f) {
+        return s ? playSound(std::span<const float>(*s), loop, gain) : -1;
     }
     // Silence one shot before it ends. `Dialog_TickUI` case 2/7/8 calls
     // `Morph_Stop` on the press that leaves a line, and `Morph_Stop` stops the

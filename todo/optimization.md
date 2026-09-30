@@ -2172,6 +2172,41 @@ used to be read on the line's first frame for every branch.
   streaming the decode as the original does would cover the first line too and
   needs a mixer voice that pulls. Not run on a console.
 
+### 33. An effect's samples shared with the mixer, not copied a play (2026-09-30, M3)
+
+Row m of step 28: `playSound` / `sounds` spikes of 9-29 ms on the console.
+
+**The original**: `Sound_Play3D` (0x0046CDC0) plays a `DuplicateSoundBuffer`
+of the bank's buffer - a second voice on the SAME sample memory. **The port**
+kept each converted effect in a cache (2026-09-27) and then copied it whole
+into the mixer on every play - a megabyte of floats for a three-second sample -
+WITH THE MIXER LOCKED for the copy, so the audio callback waited on it; and
+the log line beside two of the four play sites measured the sample's peak
+again each time, a second pass over all of it.
+
+**Now**: a mixer voice holds a `shared_ptr` to its samples
+(`Frontend::playSound`'s shared form; `SdlFrontend::Shot`), the cache holds
+the same pointer, and a play from the cache copies nothing. A caller's own
+span is still copied, but before the lock; what the eight-voice cap pushes out
+is freed after it. The peak is measured once, where the sample is converted
+(`SfxSample::peak`). A sample still sounding when the scene's cache is cleared
+lives until its voice ends.
+
+* **The same sounds**: against `7b533a8`'s viewer, a 160-frame walk down
+  Anekbah's street logs the same 17 `audio:` effect lines (lengths, gains and
+  peaks) and renders the same frame; the shoot phase (`--area 230
+  --scene-chunk 56`) the same 4. `engine: fight library` and `engine: audio
+  queue bound` green. **The mix itself has no check**: nothing in the tree
+  captures the device's output, and the dummy audio driver's callback runs on
+  its own clock.
+* **Seen on the way, not this step's**: the shoot phase's frame 400 differs
+  run to run in a column at x 73-120 (902-1459 pixels) on BOTH builds, as the
+  talker's picture does in a sneak call (step 32). Two comparisons by dump are
+  blind there.
+* **Left**: the scene's cache still clears on a scene change, so an effect's
+  first play in a scene converts its WAV on the frame; the original loads a
+  scene's sounds with its `.SCX`. Not run on a console.
+
 ## What is NOT in scope
 
 * The software renderer's speed. It is the reference and a comparison tool;

@@ -190,7 +190,10 @@ bool DialogPlayer::enter(int node) {
     lineAt_ = 0.0;
     lineLen_ = 0.0;
     pcm_.clear();
-    morph_.clear();
+    devPcm_.clear();
+    morph_.reset();
+    loadPrefetched_ = false;      // a line with no voice was not read ahead
+    loadMs_[0] = loadMs_[1] = loadMs_[2] = 0.0;
     replies_.clear();
     channels_ = 1;
     voice_ = n.name;
@@ -226,8 +229,9 @@ bool DialogPlayer::enter(int node) {
             loadMs_[0] = here.ms[0];
             loadMs_[1] = here.ms[1];
         }
-        morph_ = std::move(l->morph);
+        morph_ = std::make_shared<const std::vector<std::byte>>(std::move(l->morph));
         pcm_ = std::move(l->pcm);
+        devPcm_ = std::move(l->dev);
         channels_ = l->channels;
         if (!pcm_.empty()) {
             lineLen_ = static_cast<double>(pcm_.size()) /
@@ -261,6 +265,9 @@ void DialogPlayer::loadLine(LineAhead& l) {
     l.ms[1] = std::chrono::duration<double, std::milli>(
                   std::chrono::steady_clock::now() - t1).count();
     l.channels = L.channels > 1 ? 2 : 1;
+    if (l.toDevice && !l.pcm.empty()) l.dev = l.toDevice(l.pcm, l.channels);
+    l.ms[1] = std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - t1).count();
 }
 
 void DialogPlayer::prefetchSuccessors(int node) {
@@ -283,6 +290,7 @@ void DialogPlayer::prefetchSuccessors(int node) {
         else {
             auto l = std::make_shared<LineAhead>();
             l->path = path;
+            l->toDevice = toDevice_;
             l->job = std::make_unique<BackgroundJob>([l] { loadLine(*l); });
             keep[path] = std::move(l);
         }

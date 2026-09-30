@@ -10,6 +10,7 @@
 #include "script/inventory.h"
 #include "script/objects.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -78,9 +79,30 @@ std::string headerName(std::span<const std::byte> b, std::size_t off,
     return s;
 }
 
+// AN ARCHIVE, READ ONCE. `Archive_ReadChunk` (0x0040FF90) seeks to the 2048
+// byte directory group the index falls in, reads it, seeks to the chunk and
+// reads the chunk - a few KB from a file it never holds. This read the WHOLE
+// archive for every chunk: `IAM\AREA` (1.25 MB) and `IAM\SCENE` on every area
+// load, `IAM\DIALOG` (1 MB) at every conversation's start - on a console's
+// card, most of the 270 ms `game frame` an area change began with
+// (2026-09-30). The three are inputs and never written, so they are kept:
+// 2.6 MB, against a ranged read this port's file layer does not have.
+const std::vector<std::byte>& archiveBytes(const std::string& path) {
+    static std::map<std::string, std::vector<std::byte>> kept;
+    auto it = kept.find(path);
+    if (it == kept.end()) {
+        it = kept.emplace(path, readFile(path)).first;
+        // an unreadable file is asked for again next time, as before
+        if (it->second.empty()) { kept.erase(it); static const std::vector<std::byte> none; return none; }
+        std::printf("session: %s kept in memory (%zu KB) - a chunk is no longer a read of the file\n",
+                    path.c_str(), it->second.size() / 1024);
+    }
+    return it->second;
+}
+
 std::vector<std::byte> readChunk(const std::string& iam, const char* archive, int id) {
     if (id < 0) return {};
-    const auto file = readFile(iam + "/" + archive);
+    const auto& file = archiveBytes(iam + "/" + archive);
     const auto arch = IamArchive::open(file);
     const auto c = arch.chunk(static_cast<std::size_t>(id));
     return std::vector<std::byte>(c.begin(), c.end());
@@ -363,6 +385,8 @@ bool Session::tickLoad(int slot) {
     // cases 2..8: `if (!sub_41EFA0()) return 0` - the queued read of the set
     // is not served yet. One slice a frame; `frame()` serves them.
     if (load_.slicesLeft > 0) return false;
+    // ...and not before the frontend's set is ready, when it says so
+    if (loadGate_ && !loadGate_(slot)) return false;
     completeLoad(slot);
     return true;
 }
@@ -389,7 +413,17 @@ void Session::completeLoad(int slot) {
     // in the REST pose, which for the crowd models is a T-pose. Jumping
     // straight to the area hid it, because `omk-play` makes the `.SCX`
     // resident itself before the first frame.
+    // WHAT THE TICK COSTS, by case: the engine does cases 2..9 in one tick and
+    // so does this, and a console spent 1.5 s in it arriving in Anekbah
+    // (2026-09-30) with nothing saying on what.
+    using LoadClock = std::chrono::steady_clock;
+    const auto loadMs = [](LoadClock::time_point a) {
+        return std::chrono::duration<double, std::milli>(LoadClock::now() - a).count();
+    };
+    auto lt = LoadClock::now();
     if (!scptData_.empty()) reloadScene(s.area, s.scene);
+    const double msScene = loadMs(lt);
+    lt = LoadClock::now();
     // case 9: `Script_NewContext(slot, block[+4], 0, 0)`, `*block = ctx`,
     // `Script_QueueAction(ctx, 1)` for the AREA, then the SCENE the DB names.
     // The active slot and area are set to this slot for the duration and
@@ -399,16 +433,25 @@ void Session::completeLoad(int slot) {
     // `Scene_LoadProps(area, scene, 1)` - the object slots handed out and
     // the prop records' +0 written. The order is the engine's.
     spawnFromTables(slot & 1, true, true);
+    const double msActors = loadMs(lt);
+    lt = LoadClock::now();
     loadProps(slot & 1, true, true);
+    const double msProps = loadMs(lt);
+    lt = LoadClock::now();
     // case 8: `Area_LoadSliderTrack` -> `Slider_Init`, for an area naming a
     // circuit - the pedestrians spawn here, before the startup scripts run
     loadTrafficFor(slot & 1);
+    const double msTraffic = loadMs(lt);
+    lt = LoadClock::now();
     s.areaCtx = queueStartup(slot & 1, false);
     if (s.scene != -1 && !s.sceneChunk.empty())
         s.sceneCtx = queueStartup(slot & 1, true);
     s.loaded = true;
     load_.active = false;
     zonesRegisterAll();
+    std::printf("session: area %d's load completed - the .SCX %.1f ms, actors %.1f, props %.1f, "
+                "the traffic circuit %.1f, startup contexts and zones %.1f\n",
+                s.area, msScene, msActors, msProps, msTraffic, loadMs(lt));
 }
 
 int Session::loadArea(int areaId) {
@@ -2189,7 +2232,7 @@ void Session::openDialog(int id) {
     // audio and no clock, and it closes the dialog itself. That is what every
     // headless run did before conversations could be played.
     if (morphDir_.empty()) return;
-    const auto file = readFile(iam_ + "/DIALOG");
+    const auto& file = archiveBytes(iam_ + "/DIALOG");
     if (file.empty()) return;
     const auto arch = IamArchive::open(file);
     const auto chunk = arch.chunk(static_cast<std::size_t>(id));

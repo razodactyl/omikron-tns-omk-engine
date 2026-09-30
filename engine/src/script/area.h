@@ -153,6 +153,9 @@ public:
     // It draws nothing and offers no reply menu - see `DialogPlayer`.
     void attachDialogue(const std::string& morphDir) { morphDir_ = morphDir; }
     const DialogPlayer& dialogue() const { return dialog_; }
+    // how a frontend wants a line's voice for its device (`DialogPlayer::setToDevice`)
+    void setVoiceToDevice(DialogPlayer::ToDevice f) { dialog_.setToDevice(f); }
+    std::vector<float> takeVoiceDevicePcm() { return dialog_.takeDevicePcm(); }
     // WHICH character speaks the open conversation - the model named by the
     // actor record whose id at +272 is the DIALOG chunk's word 0. Resolved
     // against the RESIDENT chunks, because an actor id is reused across areas
@@ -618,6 +621,15 @@ public:
     // (the count comes off the shipped file) and tier 6 for the pacing (no
     // capture times a load). The boot load is mode 0 and takes none.
     bool loading() const { return load_.active; }
+    // THE LOAD WAITS FOR THE SET, which is what the engine's does:
+    // `Area_TickLoad` case 2 is `if (!sub_41EFA0()) return 0` - "the queued
+    // read is not served yet" - and how many frames that is on a real machine
+    // is the disc's speed, not a number in the game. The slice count below is
+    // the FASTEST it can be (the file's size over 0x20000 a frame); a frontend
+    // that prepares the set off the frame may hold the load past it, by
+    // answering false here until its set is ready. Unset, the count alone
+    // decides - which is every headless run and check.
+    void setLoadGate(std::function<bool(int slot)> ready) { loadGate_ = std::move(ready); }
     int  loadSlicesLeft() const { return load_.slicesLeft; }
     int  loadingSlot() const { return load_.slot; }
     // Async_SetMode(1)'s slice, for a probe that wants to show the count move.
@@ -1509,6 +1521,7 @@ private:
     Transition tr_;                          // dword_6A0600
     int  deferred_ = -1;                     // dword_4C0130
     struct Load { bool active = false; int slot = 0; int slicesLeft = 0; } load_;
+    std::function<bool(int)> loadGate_;
     std::size_t sliceBytes_ = 0x20000;       // Async_SetMode(1)'s ElementSize
     int  asyncMode_ = 0;                     // dword_4E91C0: 0 read now, 1 a slice a frame
     bool leaveFromZones_ = false;

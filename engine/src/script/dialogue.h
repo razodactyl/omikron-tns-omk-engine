@@ -289,7 +289,21 @@ public:
     const std::vector<std::int16_t>& pcm() const { return pcm_; }
     // the line's whole `.3DM`, as read for its voice - the face's tracks come
     // out of the same file, and a frontend need not read it again
-    const std::vector<std::byte>& morph() const { return morph_; }
+    const std::vector<std::byte>& morph() const {
+        static const std::vector<std::byte> none;
+        return morph_ ? *morph_ : none;
+    }
+    // ...SHARED, so a frontend keeps the 3-4 MB for the face without copying
+    // them on the frame the line starts (a console, 2026-09-30)
+    std::shared_ptr<const std::vector<std::byte>> morphShared() const { return morph_; }
+    // THE VOICE FOR THE DEVICE, prepared with the line. A frontend says how
+    // its device wants a line's samples (a pure function - it runs on the
+    // read-ahead thread); a line prepared ahead then carries them, and
+    // `takeDevicePcm` hands them over once. Empty for a line loaded on its
+    // frame, which the frontend converts itself, as before.
+    using ToDevice = std::vector<float> (*)(const std::vector<std::int16_t>& pcm, int channels);
+    void setToDevice(ToDevice f) { toDevice_ = f; }
+    std::vector<float> takeDevicePcm() { return std::move(devPcm_); }
     // what the line's start cost here, in ms: the file read and the voice's
     // decode - a console's wait on a line (2026-09-23) is apportioned by these
     double loadReadMs() const { return loadMs_[0]; }
@@ -349,7 +363,9 @@ private:
     std::string voice_, line_;
     std::vector<DialogReply>  replies_;
     std::vector<std::int16_t> pcm_;
-    std::vector<std::byte> morph_;
+    std::shared_ptr<const std::vector<std::byte>> morph_;
+    std::vector<float> devPcm_;
+    ToDevice toDevice_ = nullptr;
     double loadMs_[3] = {0.0, 0.0, 0.0};
     bool loadPrefetched_ = false;
     // THE LINES THAT CAN COME NEXT, READ AHEAD (2026-09-23): the `.3DM` of
@@ -370,7 +386,9 @@ private:
         std::vector<std::byte> morph;
         std::vector<std::int16_t> pcm;
         int channels = 1;
-        double ms[2] = {0.0, 0.0};          // read, decode
+        std::vector<float> dev;             // ...for the device, when asked
+        ToDevice toDevice = nullptr;
+        double ms[2] = {0.0, 0.0};          // read, decode (and the device's)
         std::unique_ptr<BackgroundJob> job;
     };
     static void loadLine(LineAhead& l);

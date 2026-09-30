@@ -122,6 +122,21 @@ vita_create_vpk(omk_bench.vpk ${OMK_TITLE_BENCH} omk_bench.self
 # nothing built on it runs in the emulator - and the SDK's otherwise.
 set(OMK_VITAGL ${ENGINE}/build/vitagl/libvitaGL.a)
 if(EXISTS ${OMK_VITAGL})
+  # ...and built by the recipe AS IT IS NOW (`omk-recipe.stamp`, written by the
+  # script): a library from before a patch was added would link and ship
+  # without it, silently.
+  set(OMK_VITAGL_STAMP "")
+  if(EXISTS ${ENGINE}/build/vitagl/omk-recipe.stamp)
+    file(READ ${ENGINE}/build/vitagl/omk-recipe.stamp OMK_VITAGL_STAMP)
+  endif()
+  file(SHA256 ${ENGINE}/../scripts/vita-vitagl.sh OMK_VITAGL_SH)
+  file(SHA256 ${ENGINE}/../scripts/vita-vitagl-patch.py OMK_VITAGL_PY)
+  if(NOT OMK_VITAGL_STAMP STREQUAL "${OMK_VITAGL_SH}\n${OMK_VITAGL_PY}\n")
+    message(FATAL_ERROR "vitaGL: ${OMK_VITAGL} was not built by the current "
+            "scripts/vita-vitagl.sh and vita-vitagl-patch.py (its omk-recipe.stamp "
+            "is missing or differs) - it may lack the shader-cache and the "
+            "film-memory patches. Run scripts/vita-vitagl.sh, then build again.")
+  endif()
   message(STATUS "vitaGL: ${OMK_VITAGL} (no splash screen; runs in Vita3K)")
 else()
   set(OMK_VITAGL vitaGL)

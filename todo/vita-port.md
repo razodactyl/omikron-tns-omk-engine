@@ -1548,3 +1548,55 @@ on TICKS where the engine runs them on the frame delta (`docs/CUTSCENES.md`
 its length; and the title logo (`IMAGES/ZVOG001.BMP`, a `media.play`
 document) was stretched to the display with a runtime divide per pixel, 83 ms
 of every frame it was up (a column table now).
+
+### 2026-09-30, 14:00: the console on steps 29-34 - and a VPK built on a stale vitaGL
+
+`omk-play-20260930-140045.log`, the build of `a87e2c3` made on the M3.
+
+**THE FILMS DID NOT PLAY, and it was the BUILD.** `free: main 12288 KB, CDRAM
+0 KB, PHYCONT 0 KB`, three `0x01` events, `0 frames shown` - the fault of
+2026-09-23 exactly. The M3's `engine/build/vitagl/libvitaGL.a` was dated
+2026-09-18: built before the shader-cache patch (09-21) and before the memory
+patch (09-24), and the VPK linked it without a word (`0 precompiled file(s)`
+in the log's third line was the other half). `scripts/vita-vitagl.sh` now
+writes `omk-recipe.stamp` - the hashes of itself and of the patch script - and
+`backends/vita/CMakeLists.txt` REFUSES a library whose stamp is missing or
+differs, naming the script. Rebuilt; the VPK of 14:53 has both patches. **The
+library is per machine (`build/` is not committed): run the script on each.**
+
+**What the log says of the steps:**
+
+| step | the log |
+|---|---|
+| 30, the player | `posed by the RENDERER` from frame 2659; 1502 frames by the renderer, 41 on the CPU by the end |
+| 30, the sky | `MOVED BY THE RENDERER` |
+| 28-30, uploads | `gles world`: 0.0-0.2 whole uploads a frame, 2-2.7 streamed |
+| 31, the set | ANEKBAH: read 378 ms, geometry 434, textures 136, soups 312, the rest 32 - **1292 ms on the thread, and the frame WAITED 727 ms**: sixteen frames (~565 ms) were not enough |
+| 31, the rebuild | `soups and grids 139.3 ms, the texture pool 60.5 ms` with Anekbah in; 146 ms again when ARESTO joins it |
+| 32, a line | ahead lines: read 0, decode 0 - but `resample 49-68 ms` and 86-125 ms `here in all`; the first line: read 375, decode 38, resample 47, 258 here |
+| the city | `sim+draw` 40-50 ms a frame (72 in the first minute) |
+
+**The arrival in Anekbah, frame by frame**: 3282, 348 ms - `game frame 270`
+(the request); 3298, 983 ms - the wait and the rebuild; **3299, 2480 ms -
+`game frame 1530`, `props, guns 442`, `screens 297`**: the Session's one-tick
+load and what it calls back for (`model load:` lines come to ~300 ms of it;
+the rest is not attributed).
+
+**Done about it the same afternoon** (`todo/optimization.md` step 35):
+* **the load HELD for the set** (`Session::setLoadGate`, on by default on the
+  Vita): `Area_TickLoad` waits on its reader, however long the disc takes, and
+  so does the Session now - the frame no longer waits, the airlock is drawn
+  for the ~20 frames more the set needs;
+* **the IAM archives read once**: every area load read `IAM\AREA` (1.25 MB)
+  and `IAM\SCENE` whole for one chunk, every conversation `IAM\DIALOG` (1 MB)
+  - where `Archive_ReadChunk` reads 2 KB and the chunk. Most of the request
+  frame's 270 ms at the card's 8 MB/s;
+* **a line's device samples and face bytes off the frame**: the conversion to
+  the device's floats runs with the decode on the read-ahead thread, and the
+  3-4 MB `.3DM` is shared with the viewer instead of copied;
+* the Session's load says what each case cost, and the sprite reload its own.
+
+**For the next log**: the films (READY, a frame count); `set load:` - `the
+frame waited 0.0 ms ... the Session's load N frame(s)`; `session: area 0's load
+completed - the .SCX ... ms, actors, props, the traffic circuit`; `line load:`
+with `resample 0`; and what is left in frame 3299's `game frame`.

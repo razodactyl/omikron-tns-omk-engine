@@ -205,6 +205,13 @@ Vita for a while, so the next work should be provable on the Mac.
   rows, written into the texture's memory). Put `OMK_PRESENT_CHECK=1` in the
   environment for one run if a screen shows stale rows: it says so by count.
 
+* **step 35 - the console's answer (14:00 log) and four changes**: the
+  Session's load HELD until the set is ready (the frame waited 727 ms for
+  Anekbah; on by default on the Vita), the IAM archives read once, a line's
+  device samples and face bytes off its frame, and a build that refuses a
+  stale vitaGL. `todo/vita-port.md`'s 14:00 entry has the log read line by
+  line and what to look for next.
+
 **The reader's rule for this work (2026-09-30)**: the original is faster than
 the port, so **read the original's function for each task first** and take
 what it does - it found the mirror's two passes, the crowd LOD, the camera
@@ -326,6 +333,11 @@ change touches.
 * **A job on its own thread** is `BackgroundJob` (`platform/threads.h`): it
   must own its inputs and outputs, and the FRAME it is used on must come from
   the game's state, never from when it finished - or two runs differ.
+* **`engine/build/vitagl/libvitaGL.a` IS PER MACHINE** and nothing rebuilt it
+  when a patch was added: a VPK from the M3 went out on a library of
+  2026-09-18 and the films stopped playing (`CDRAM 0 KB`). The build now
+  refuses one whose `omk-recipe.stamp` does not match; run
+  `scripts/vita-vitagl.sh` on each machine.
 * **The A9 has no integer DIVIDE**: a `/` by a runtime value is a library
   call. Keep it out of per-pixel loops (the overlay planes' `row`, 2026-09-29).
 * **vitaGL overflows uniform ARRAYS** - use separate `vec4`s (`uWave0..7`).

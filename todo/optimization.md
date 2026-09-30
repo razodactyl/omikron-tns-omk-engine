@@ -2243,6 +2243,43 @@ more than a quarter of the rows changed, not a call a row.
   code, which a console has run since 2026-09-27. No verify.py check (a GL
   window). Not run on a console - there, read `present, swap` on the menu.
 
+### 35. What the console said of steps 29-34, and four answers (2026-09-30)
+
+The log and its reading are `todo/vita-port.md`'s 14:00 entry. The four
+changes it asked for, each against the original:
+
+* **The load waits for the set.** `Area_TickLoad` case 2 is `if
+  (!sub_41EFA0()) return 0`: it waits until the reader has served the file,
+  and how many frames that is belongs to the disc. The port's slice count is
+  the FASTEST that can be, and a console needed 1292 ms where the count gave
+  ~565 - so step 31's frame waited 727 ms. `Session::setLoadGate` lets a
+  frontend hold the load until its set is ready; `omk-play` sets it on the
+  Vita (`OMK_NO_LOAD_GATE=1` off) and under `OMK_LOAD_GATE=1` elsewhere, so
+  every check still runs by the count alone. With `OMK_LOAD_DELAY_MS=1500` on
+  the M3: asked at frame 3, in at 127, the frame waited 0.0 ms, the Session
+  held 108 frames, the emitters bound the frame after, the area shown the
+  next. `engine: airlock walk`, `walk-in scene`, `tunnel door walk` and `the
+  sky` are green with the gate on and a 400 ms delay, and without. The default
+  path is byte-identical to `OMK_SYNC_SETS=1`, as before.
+* **An archive is read once.** `Archive_ReadChunk` (0x0040FF90) reads the
+  2048-byte directory group and the chunk; `readChunk` read the whole file for
+  every chunk. `archiveBytes` keeps AREA, SCENE and DIALOG (2.6 MB). A ranged
+  read would be the original's mechanism and this port's file layer has none.
+* **A line's start**: `resampleToDevice` was 47-68 ms on the console at the
+  SAME rate (a 4.8 MB fill) and the `.3DM` was copied for the face. The device
+  conversion is a hook the frontend gives the conversation
+  (`DialogPlayer::setToDevice`), run on the read-ahead thread; the bytes are a
+  `shared_ptr`. The divide a sample became a multiply by 1/32768 - the same
+  float. `engine: line ahead` and `dialogue play` green.
+* **A Vita build refuses a stale vitaGL** (`omk-recipe.stamp`).
+
+**Still on the arrival frames, sized by this log and not yet touched**: the
+Session's tick (`game frame` 1530 ms - now said case by case), `props, guns`
+442, `screens` 297, the world rebuild's 139 ms of soups and grids (and again
+for every set that joins). The set's own preparation could also be halved in
+wall time by splitting geometry from textures-and-soups over two threads, and
+`buildGeometry` pays five map lookups a triangle.
+
 ## What is NOT in scope
 
 * The software renderer's speed. It is the reference and a comparison tool;

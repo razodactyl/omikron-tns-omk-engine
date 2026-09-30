@@ -105,6 +105,7 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <thread>
 #include <mutex>
 #include <set>
 #include <string>
@@ -489,9 +490,12 @@ std::vector<float> resampleToDevice(const std::vector<std::int16_t>& pcm,
         std::vector<float> o(frames * 2);
         float* w = o.data();
         const std::int16_t* p = pcm.data();
+        // (times 1/32768, not divided by it: a power of two, so the same
+        // float, without a divide a sample on an A9)
+        constexpr float k = 1.0f / 32768.0f;
         for (std::size_t f = 0; f < frames; ++f, p += channels) {
-            w[0] = p[0] / 32768.0f;
-            w[1] = channels > 1 ? p[1] / 32768.0f : w[0];
+            w[0] = p[0] * k;
+            w[1] = channels > 1 ? p[1] * k : w[0];
             w += 2;
         }
         return o;
@@ -3688,7 +3692,8 @@ int main(int argc, char** argv) {
     // the actor's clip AND its frame (rec[47]), and the blend-in eases from
     // that frame into the line (pose.h, BLENDING TWO POSES).
     float sceneFrameLast = 0.0f, lineIdleFrame = 0.0f;
-    std::vector<std::byte> speakerMorph;   // the line's .3DM, for the FACE
+    // the line's .3DM, for the FACE - the conversation's own bytes, shared
+    std::shared_ptr<const std::vector<std::byte>> speakerMorph;
     std::string speakerModel, speakerVoice;
     int voiceShot = -1;   // the line's voice in the mixer, for the press that cuts it
     float speakerAt[3] = {0, 0, 0};      // the camera solve, a GROUND point
@@ -5491,6 +5496,7 @@ int main(int argc, char** argv) {
     const auto refreshSprites = [&]() {
         if (session.scene().file() == spriteScx) return;
         spriteScx = session.scene().file();
+        const auto sp0 = std::chrono::steady_clock::now();
         spriteTab = spriteBase;                          // the two libraries, as above
         const int glob = spriteBaseGlobal;
         const int fightSp = spriteBaseFight;
@@ -5498,9 +5504,11 @@ int main(int argc, char** argv) {
         int okTex = 0;
         for (const auto& kv : spriteTab.tex) if (kv.second.width) ++okTex;
         std::printf("sprites: reloaded for %s - %d global + %d fight + %d local, "
-                    "%d decoded\n",
+                    "%d decoded, %.1f ms\n",
                     spriteScx.empty() ? "<none>" : spriteScx.c_str(), glob,
-                    fightSp, local, okTex);
+                    fightSp, local, okTex,
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - sp0).count());
         ++poolComposition;          // the sprite section of the pool changed
     };
 
@@ -5772,6 +5780,8 @@ int main(int argc, char** argv) {
         std::size_t bytes = 0;
         double ms[5] = {0, 0, 0, 0, 0};  // read, geometry, textures, soups, the rest
         long askedFrame = 0;
+        int delayMs = 0;                 // `OMK_LOAD_DELAY_MS`
+        int heldFrames = 0;              // frames the Session's load waited on the job
         std::unique_ptr<omk::BackgroundJob> job;
     };
     std::shared_ptr<SetLoad> setLoads[2];
@@ -5780,12 +5790,37 @@ int main(int argc, char** argv) {
     std::string slotAsked[2];
     int slotAskedArea[2] = {-1, -1};
     const bool syncSets = omk::envSet("OMK_SYNC_SETS");   // A/B only
+    // THE LOAD HELD FOR THE SET (`Session::setLoadGate`). A console's card and
+    // A9 took 1.3 s over Anekbah where the slices give 0.57, and the frame
+    // that brought the set in waited 727 ms for the rest (2026-09-30). With
+    // the gate the Session's load waits instead, as `Area_TickLoad` waits on
+    // its reader, and the game draws on. The frame the set arrives on is then
+    // the machine's, so it is ON only where that is wanted: a Vita, or
+    // `OMK_LOAD_GATE=1`; every check runs by the count alone.
+#if defined(__vita__)
+    const bool loadGate = !syncSets && !omk::envSet("OMK_NO_LOAD_GATE");
+#else
+    const bool loadGate = !syncSets && omk::envSet("OMK_LOAD_GATE");
+#endif
+    // (a test's slow card: the job sleeps this long first - desktop only)
+    const int loadDelayMs = std::getenv("OMK_LOAD_DELAY_MS") ? std::atoi(std::getenv("OMK_LOAD_DELAY_MS")) : 0;
+    session.setVoiceToDevice([](const std::vector<std::int16_t>& pcm, int channels) {
+        return resampleToDevice(pcm, channels, 22050, kDeviceRate);
+    });
+    if (loadGate)
+        session.setLoadGate([&setLoads](int slot) {
+            const auto& L = setLoads[slot & 1];
+            return !L || !L->job || L->job->ready();
+        });
     const auto prepareSet = [](SetLoad& L) {
         using clk = std::chrono::steady_clock;
         const auto since = [](clk::time_point a) {
             return std::chrono::duration<double, std::milli>(clk::now() - a).count();
         };
         WorldSlot& w = L.out;
+#if !defined(__vita__)
+        if (L.delayMs > 0) std::this_thread::sleep_for(std::chrono::milliseconds(L.delayMs));
+#endif
         auto t = clk::now();
         const auto d = omk::DataFs::readPath(L.path3do);
         std::vector<std::byte> td;
@@ -5876,7 +5911,10 @@ int main(int argc, char** argv) {
         const bool streams = !syncSets && session.loading() && session.loadingSlot() == slot &&
                              session.loadSlicesLeft() > 1;
         if (!streams) prepareSet(*L);
-        else L->job = std::make_unique<omk::BackgroundJob>([L, prepareSet] { prepareSet(*L); });
+        else {
+            L->delayMs = loadDelayMs;
+            L->job = std::make_unique<omk::BackgroundJob>([L, prepareSet] { prepareSet(*L); });
+        }
         setLoads[slot] = L;
         return had;
     };
@@ -5906,12 +5944,12 @@ int main(int argc, char** argv) {
                     w.tex.size(), w.soup.size() / 9, w.mirror.found ? ", mirror" : "");
         std::printf("set load: %s - %zu KB read in %.1f ms, geometry %.1f, textures %.1f, "
                     "soups %.1f, the rest %.1f; asked at frame %ld, in at frame %ld - %s, "
-                    "the frame waited %.1f ms for it\n",
+                    "the frame waited %.1f ms for it, the Session's load %d frame(s)\n",
                     L.stem.c_str(), L.bytes / 1024, L.ms[0], L.ms[1], L.ms[2], L.ms[3], L.ms[4],
                     L.askedFrame, frame,
                     !L.job ? "prepared on the frame" :
                     L.job->threaded() ? "prepared on its own thread" : "no thread, prepared on the frame",
-                    waited);
+                    waited, L.heldFrames);
         return true;
     };
     // After any slot changed: the texture pool (slot 0's first, then slot
@@ -10955,7 +10993,7 @@ int main(int argc, char** argv) {
                 // The line's own `.3DM` drives the pose.
                 speakerVoice = dlg.voice();
                 speakerTracks = omk::NodeTracks{};
-                speakerMorph.clear();
+                speakerMorph.reset();
                 lineIdleFrame = sceneFrameLast;
                 const auto lineT0 = std::chrono::steady_clock::now();
                 const auto lineMs = [](std::chrono::steady_clock::time_point a) {
@@ -10969,11 +11007,13 @@ int main(int argc, char** argv) {
                         // voice: a line's .3DM runs to 3.5 MB, and reading it
                         // a second time here cost a console ~700 ms on the
                         // frame the line started (2026-09-23)
-                        speakerMorph = dlg.morph().empty() ? omk::DataFs::readPath(*ma)
-                                                           : dlg.morph();
+                        speakerMorph = dlg.morph().empty()
+                            ? std::make_shared<const std::vector<std::byte>>(
+                                  omk::DataFs::readPath(*ma))
+                            : dlg.morphShared();
                         const auto tt0 = std::chrono::steady_clock::now();
                         speakerTracks = omk::nodeTracks(
-                            speakerMorph, omk::rootTrackOf(speakerMeshes));
+                            *speakerMorph, omk::rootTrackOf(speakerMeshes));
                         tracksMs = lineMs(tt0);
                         const CharModel* fm = charModels.count(speakerModel)
                             ? &charModels.at(speakerModel) : nullptr;
@@ -10990,8 +11030,11 @@ int main(int argc, char** argv) {
                 front.stopSound(voiceOverShot); voiceOverShot = -1;   // one streamer
                 front.stopSound(voiceShot);
                 const auto rs0 = std::chrono::steady_clock::now();
-                std::vector<float> voiceDev = dlg.pcm().empty() ? std::vector<float>{}
-                    : resampleToDevice(dlg.pcm(), dlg.channels(), 22050, kDeviceRate);
+                // (prepared with the line when it was read ahead - then this
+                // is a hand-over and the `resample` below reads 0)
+                std::vector<float> voiceDev = session.takeVoiceDevicePcm();
+                if (voiceDev.empty() && !dlg.pcm().empty())
+                    voiceDev = resampleToDevice(dlg.pcm(), dlg.channels(), 22050, kDeviceRate);
                 const double resampleMs = lineMs(rs0);
                 const auto ps0 = std::chrono::steady_clock::now();
                 voiceShot = voiceDev.empty() ? -1 : front.playSound(std::move(voiceDev));
@@ -12624,8 +12667,14 @@ int main(int argc, char** argv) {
                     const bool streaming = !syncSets && session.loading() &&
                                            session.loadingSlot() == slot &&
                                            session.loadSlicesLeft() > 1;
-                    if (!streaming) {
-                        changed |= integrateSet(*setLoads[slot], n);
+                    // ...unless the Session's load is held for it (the gate):
+                    // then neither waits, and the game draws on
+                    SetLoad& L = *setLoads[slot];
+                    const bool held = loadGate && L.job && !L.job->ready() &&
+                                      session.loading() && session.loadingSlot() == slot;
+                    if (!streaming && held) ++L.heldFrames;
+                    if (!streaming && !held) {
+                        changed |= integrateSet(L, n);
                         setLoads[slot].reset();
                     }
                 }
@@ -16231,7 +16280,7 @@ int main(int argc, char** argv) {
                     rootFrame = static_cast<int>(sceneFrame);
                     // The FACE has no bone track: its vertices come straight
                     // out of the line's own frame, which is what moves the lips.
-                    if (!speakerMorph.empty()) fv = omk::faceFrame(speakerMorph, frame);
+                    if (speakerMorph && !speakerMorph->empty()) fv = omk::faceFrame(*speakerMorph, frame);
                     src = "the line's .3DM";
                 } else if (s.sceneTracks.valid()) {
                     s.inertAfterFight = false;     // a program owns him again

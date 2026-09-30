@@ -155,6 +155,41 @@ enhancements had left the CROWD UNLIT and EVERY BODY SHADOWLESS on GLES,
 which cannot draw per-pixel light or a shadow map: now refused at start-up
 (`lighting: per pixel REFUSED`, `shadows: mapped REFUSED ... fitted`).
 
+## 3b5. WHERE THE OPTIMIZATION STANDS (2026-09-30) - start here
+
+The port-vs-original audit is `todo/optimization.md` step 28 (the table, then
+dated "DONE" paragraphs); the console results are `todo/vita-port.md`'s
+2026-09-29/30 entries. Last console run: the apartment ~19 ms a frame (native
+mirror), the Bowie sequence ~50-67 ms a frame. Committed up to `f0e9261`, NOT
+pushed; the reader cannot test on the Vita for a while, so the next work
+should be provable byte for byte on the Mac.
+
+**Next, agreed with the reader**:
+1. **Kay'l on the GPU posing path** (4-8 ms whenever he is drawn): his 1626
+   corners are still posed, placed and uploaded every frame; the walkers,
+   staged bodies and vehicles already draw from a static rest with one affine
+   per mesh. Keep CPU corners only on frames that read them (feet latch, a
+   variant clip, melee's fist, shoot mode's arm, per-pixel light, mapped
+   shadows - the same list as the off-screen gate `playerOffView` in
+   `play.cpp`).
+2. **The sky moved on the GPU** instead of rewritten every frame (it follows
+   the camera in x/z: one affine).
+
+Then, in order: the area-change stalls (async loading, the original's one
+128 KB chunk a frame), the voice line start (decode off the main thread), the
+start menu's whole-surface upload, shared sound samples. Anekbah's moving-mesh
+grid + patch (~12 ms, 70x the Mac, unexplained) waits for a console profile.
+Open question: the original draws far walkers (coarsest LOD) to the clip
+distance; the port stops at 40 m.
+
+**How every step here was proven**: a byte-compare of dumps with the change
+on and off (env switches: `OMK_NO_SIDECULL`, `OMK_NO_PED_LOD` /
+`OMK_PED_LOD_MAX`, `OMK_STREAM`, `OMK_CPU_MIRROR`, `--cpu-bodies`) on the
+street (`--area 0 --stand 1804,0,-6890,336`), the Bowie sequence (`--area 0
+--stand 6423,-3,1675,154 --zone-enable 78`) and the Impasse (`--area 222
+--scene-chunk 55`). Read the original's function first (the reader's rule) -
+it found the mirror's two passes, the crowd LOD and the camera clock.
+
 ## 3c. The transition hitches (2026-09-23)
 
 Not model RE-loads (0 in the fight, the shoot phase and Telis's scene); the

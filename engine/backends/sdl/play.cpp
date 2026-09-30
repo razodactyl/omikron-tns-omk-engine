@@ -21059,11 +21059,23 @@ int main(int argc, char** argv) {
             // origin put the logo in the top-left corner at native size.
             // Nearest-neighbour, because the port's rule for the 2D layer is
             // an exact copy with no filtering (`ui/surface.h`).
+            // The source COLUMN per display column, once for the two widths:
+            // `x * w / fb.w` per pixel was a library divide on the Vita's A9,
+            // 522K a frame - 83 ms of every frame the title logo was up in the
+            // Bowie sequence (2026-09-30), where the original's is one
+            // DirectDraw colour-keyed blit.
+            static std::vector<int> mediaCol;
+            static int mediaColFor[2] = {-1, -1};
+            if (mediaColFor[0] != mediaBmp.w || mediaColFor[1] != fb.w) {
+                mediaColFor[0] = mediaBmp.w; mediaColFor[1] = fb.w;
+                mediaCol.resize(static_cast<std::size_t>(fb.w));
+                for (int x = 0; x < fb.w; ++x) mediaCol[static_cast<std::size_t>(x)] = x * mediaBmp.w / fb.w;
+            }
             for (int y = 0; y < fb.h; ++y) {
                 const int sy = y * mediaBmp.h / fb.h;
                 if (sy < 0 || sy >= mediaBmp.h) continue;
                 for (int x = 0; x < fb.w; ++x) {
-                    const int sx = x * mediaBmp.w / fb.w;
+                    const int sx = mediaCol[static_cast<std::size_t>(x)];
                     if (sx < 0 || sx >= mediaBmp.w) continue;
                     const std::uint16_t src =
                         mediaBmp.px[static_cast<std::size_t>(sy) *

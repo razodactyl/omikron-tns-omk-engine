@@ -1539,3 +1539,12 @@ the city; `-083909.log` - a new game through to the Bowie sequence), no crash:
   nearly all gameplay.
 - Still in Anekbah only: `grid moving` steep 4.9 + floor 1.9, `motion`
   corners 3.1 + soups 2.2.
+
+**"It is still a little slow so it gets desynchronized to the music; it gets
+extremely slow when the game logo shows up"** (the reader, same logs). Two
+causes, both fixed: the world-camera travel and the `camera.set.wait` park ran
+on TICKS where the engine runs them on the frame delta (`docs/CUTSCENES.md`
+4b, "The clock a world-camera move runs on") - at ~15 fps each move took twice
+its length; and the title logo (`IMAGES/ZVOG001.BMP`, a `media.play`
+document) was stretched to the display with a runtime divide per pixel, 83 ms
+of every frame it was up (a column table now).

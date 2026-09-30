@@ -1200,7 +1200,7 @@ void Session::restart() {
     playerAddress_ = -1;
     pendingAddress_ = -1;
     haveCam_ = false;
-    camTravel_ = camElapsed_ = 0;
+    camTravel_ = 0; camElapsed_ = 0.0;
     rootMotion_.clear();
     // `IAM\START` over a zeroed DB, `State_Apply`, day 52, 2000000 into it
     state_ = GameState::fromFile(iam_ + "/START");
@@ -1257,7 +1257,7 @@ void Session::applyCamera(int id, int travel) {
                          c->absolute() ? "absolute" : "RELATIVE");
     if (!haveCam_ || travel <= 0) {      // a cut
         camFrom_ = camTo_ = camNow_ = *c;
-        camTravel_ = camElapsed_ = 0;
+        camTravel_ = 0; camElapsed_ = 0.0;
         haveCam_ = true;
         return;
     }
@@ -1279,7 +1279,7 @@ void Session::applyCamera(int id, int travel) {
     camFrom_ = camNow_;
     camTo_     = *c;
     camTravel_ = travel;
-    camElapsed_ = 0;
+    camElapsed_ = 0.0;
 }
 
 void Session::tickCamera() {
@@ -1288,11 +1288,14 @@ void Session::tickCamera() {
             std::fprintf(stderr, "[cam] frame %ld  move to %d ENDS\n",
                          frameNo_, camTo_.id);
     if (camTravel_ <= 0) return;
-    ++camElapsed_;
+    camElapsed_ += frameSeconds_ * 30.0;
+    // LINEAR, which is the engine's curve types 0 and 2 only: `sub_418310`
+    // shapes the clock through `sub_418100`'s coefficients, and types 1, 3
+    // and 4 ease (quadratic pieces). Which type a request carries (the
+    // block's `+32`) is not traced; the ported travel is linear throughout.
     const float u = camElapsed_ >= camTravel_
                         ? 1.0f
-                        : static_cast<float>(camElapsed_) /
-                              static_cast<float>(camTravel_);
+                        : static_cast<float>(camElapsed_ / static_cast<double>(camTravel_));
     // ---- BOTH ENDS ARE SOLVED TO WORLD, EVERY FRAME ------------------
     //
     // `sub_418410` (04_sys.c:4047) is the engine's interpolator and it is a
@@ -2711,10 +2714,13 @@ void Session::onCall(int i, const Call& call) {
 void Session::execute(int i) {
     Ctx* c = ctxs_[static_cast<std::size_t>(i)].get();
     if (c->status == 7) {
-        // `camera.set.wait` wrote 7: held until the move it started ends,
-        // and the move is counted in frames (`Game_HandleEvent` case 4).
-        if (c->waitingForCamera > 0) --c->waitingForCamera;
-        if (c->waitingForCamera <= 0) c->status = 1;      // runs next frame
+        // `camera.set.wait` wrote 7: held until the move it started ends
+        // (`Game_HandleEvent` case 4) - ends on the camera's clock, which
+        // advances by the frame delta. Counting a tick a frame held the Bowie
+        // sequence's script twice its music's length at ~15 fps, the camera
+        // parked on each move's last frame (2026-09-30).
+        if (c->waitingForCamera > 0.0) c->waitingForCamera -= frameSeconds_ * 30.0;
+        if (c->waitingForCamera <= 0.0) c->status = 1;      // runs next frame
         return;
     }
     if (c->status == 3) return;      // the fight: only `fightEnded` releases it

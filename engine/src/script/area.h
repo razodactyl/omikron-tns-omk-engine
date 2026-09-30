@@ -1374,7 +1374,12 @@ private:
         int         zoneId = -1;             // +42
         // status 7's resume: `Game_HandleEvent` case 4 fires when the move
         // ends, and the move is counted in frames, so this is a COUNTDOWN.
-        int         waitingForCamera = 0;
+        // frames of the move still to run, counted down by the FRAME DELTA
+        // as the camera's own clock is (`tickCamera`): the engine releases the
+        // context with `Game_RaiseEvent(4, dword_4E7B4C)` when that clock
+        // passes the move's length (04_sys.c:4168-4173), not after as many
+        // frames as it has ticks
+        double      waitingForCamera = 0.0;
         // status 4's resume: case 3 fires when the program ends. This is the
         // program it is parked on. It is the ~5 second beat before a
         // cutscene's dialogue: AREA 118 shows Kay'l, starts his animation
@@ -1666,7 +1671,14 @@ private:
     bool         objWait_ = false;
     bool         haveCam_ = false;
     WorldCamera  camFrom_, camTo_, camNow_;
-    int          camTravel_ = 0, camElapsed_ = 0;
+    int          camTravel_ = 0;
+    // THE TRAVEL CLOCK, in frames at 30 Hz and advanced by the FRAME DELTA:
+    // the engine's `dword_4E7B34 += flt_4C30D8` (04_sys.c:4168), `30 / fps`
+    // capped at 3. Counting ticks instead ran every camera move at the
+    // console's frame rate - the Bowie sequence, whose moves are timed to the
+    // music, fell behind it at ~15 fps (2026-09-30). A frame-bounded run's
+    // delta is exactly 1, so a headless run counts as it did.
+    double       camElapsed_ = 0.0;
     unsigned long camRequests_ = 0;   // every resolved `Camera_Request`
     long         frameNo_ = 0;
     mutable DialogPlayer dialog_{state_, table_};

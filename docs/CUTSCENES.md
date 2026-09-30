@@ -500,6 +500,34 @@ The camera names say what it is on their own: `cam Bowie Flamme`,
 `cam Bowie Passants`. It is the credits, flown through Anekbah over the Bowie
 theme. `verify.py: camera scripts`.
 
+### The clock a world-camera move runs on (read 2026-09-30)
+
+A world-camera cutscene is timed by its MOVES: the title sequence is 23
+`camera.set` / `camera.set.wait` pairs whose travels add to ~4380 frames, the
+music's 143.8 s. The engine runs that clock on the FRAME DELTA:
+
+    dword_4E7B34 += flt_4C30D8            ; 04_sys.c:4168 - 30 / fps, capped at 3
+    if (dword_4E7B34 > duration) {
+        if (dword_4E7B4C != -1) Game_RaiseEvent(4, dword_4E7B4C);   ; the parked context
+        ...                                                          ; the move ends
+    }
+
+so a slow machine takes bigger steps and the sequence stays on the music down
+to 10 fps, and the `camera.set.wait` that parked the script (status 7, resume
+id `dword_4E7B4C`) is released by the SAME event that ends the move. The port
+counted both in TICKS - the travel `++` a frame and the park a countdown of
+`travel` frames - so on a console at ~15 fps each move took twice its length
+and the pictures fell behind the music. Both now advance by the delta
+(`Session::tickCamera`, `Session::execute`); a frame-bounded run's delta is 1,
+so a headless run is unchanged, and at `--speed 2` the camera at frame k is
+where it is at frame 2k at normal speed.
+
+**Still a reconstruction**: the move's CURVE. `sub_418310` shapes the clock
+through coefficients `sub_418100` sets by a type at the request block's
+`+32` - 0 and 2 linear, 1, 3 and 4 eased with quadratic pieces - and the port
+moves linearly throughout; which type a script's request carries is not
+traced.
+
 ## 5. Playing one back
 
 ```bash

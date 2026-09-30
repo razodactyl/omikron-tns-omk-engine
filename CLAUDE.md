@@ -1432,10 +1432,11 @@ why §1 has a rule about it:
   viewer, and it **refuted** `ASSETS` 4c's "a mirror is a darkening overlay …
   and it is what the code does". `drawWithMirror` implements it on the
   renderer boundary, so both backends get it (0.998 coverage agreement).
-  **Two parts stay reconstruction and are labelled as such**: how the engine
-  confines the reflection to the mirror's area (its X flip is global; no clip
-  or stencil step was traced) and the plane's NORMAL (the engine reads a
-  runtime value, so this takes the face's cross product). Both were
+  **One part stays reconstruction**: the plane's NORMAL (the engine reads a
+  runtime value, so this takes the face's cross product). How the engine
+  CONFINES the reflection was read on 2026-09-30 - draw order and depth: the
+  reflected pass first, the real pass over it with no clear between
+  (`docs/ASSETS.md` 4c) - and the GPU backends now draw it that way. Both were
   **confirmed by PLAYING** — flown across viewpoints the mirror is correct and
   its edges line up, which is the transition test §1 asks for and the only
   thing that can settle a plane, a normal's sign or a flip: each of the three

@@ -1315,7 +1315,7 @@ int sceneViewer(const std::string& fr, const std::string& setName,
         if (ms.active != mirrorWas) {
             std::printf("mirror %s%s (%ld px, camera %.0f in front)\n",
                         ms.active ? "REFLECTING" : "not in view",
-                        ms.native ? " [gpu stencil]" : "",
+                        ms.native ? " [native: the two passes]" : "",
                         ms.maskPixels, ms.distance);
             mirrorWas = ms.active;
         }
@@ -18633,7 +18633,7 @@ int main(int argc, char** argv) {
                 std::printf("frame %ld: the set's mirror is %s%s (%ld px, camera "
                             "%.0f in front)\n", n,
                             mst.active ? "REFLECTING" : "out of view - the camera is behind it",
-                            mst.native ? " [gpu stencil]" : "",
+                            mst.native ? " [native: the two passes]" : "",
                             mst.maskPixels, static_cast<double>(mst.distance));
             }
             // The backend drew the picture into the top-left `vw x vh`; place

@@ -623,6 +623,11 @@ public:
 private:
 
     bool uploadGeometry(const Geometry* g);
+    void setView(const View& view);
+public:
+    bool drawMirrorScene(const View& v, const View& refl, std::span<const Draw> scene,
+                         std::span<const Draw> sceneClipped, std::span<const Draw> mirror) override;
+private:
     void resolveTies(const Draw& d, Vbo& vb);
     // Write the tie's applied losers degenerate into `v`, which holds corners
     // [lo, hi] of `g` about to be uploaded - so the buffer keeps holding every
@@ -1455,36 +1460,9 @@ void GlesRenderer::resolveTies(const Draw& d, Vbo& vb) {
     t.touched = true;
 }
 
-void GlesRenderer::begin(const View& view) {
-    g_glesWindow.uploads += g_glesFrame.uploads;
-    g_glesWindow.uploadBytes += g_glesFrame.uploadBytes;
-    g_glesWindow.uploadMs += g_glesFrame.uploadMs;
-    g_glesWindow.drawMs += g_glesFrame.drawMs;
-    g_glesWindow.tieMs += g_glesFrame.tieMs;
-    g_glesWindow.wholeUploads += g_glesFrame.wholeUploads;
-    g_glesWindow.streamed += g_glesFrame.streamed;
-    g_glesFrame = GlesFrameCounts{};
-    if (!deadBufs_.empty()) {
-        glDeleteBuffers(static_cast<GLsizei>(deadBufs_.size()), deadBufs_.data());
-        deadBufs_.clear();
-    }
-    ++frameNo_;
-    st_ = RasterStats{};
-    view_ = view;
-    fog_ = view.fog;
-    fogStart_ = view.fogStart;
-    fogEnd_ = view.fogEnd;
-    for (int i = 0; i < 3; ++i) fogColour_[i] = static_cast<float>(view.fogColour[i]) / 255.0f;
-    dither_ = view.dither;
-
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
-    glViewport(0, 0, w_, h_);
-    glDisable(GL_SCISSOR_TEST);
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);   // black, as the engine clears
-    OMK_GL_CLEAR_DEPTH(1.0f);
-    glDepthMask(GL_TRUE);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
+// THE VIEW, apart from `begin`'s clear: the mirror pass switches it mid-frame
+// (`drawMirrorScene`) - the viewport, the MVP and both programs' copies of it.
+void GlesRenderer::setView(const View& view) {
     // The letterbox is a VIEWPORT in the TOP-LEFT `vw x vh` of the target, as
     // the Vulkan backend places it. GL's window origin is bottom-left, so the
     // top-left rectangle starts at row `h - vh`.
@@ -1517,17 +1495,82 @@ void GlesRenderer::begin(const View& view) {
         for (int r = 0; r < 4; ++r) mvp[c * 4 + r] = rows[r][c];   // column-major
 
     std::memcpy(mvp_, mvp, sizeof mvp_);
+    if (posed_) {
+        glUseProgram(posed_);
+        glUniformMatrix4fv(posedLoc_.mvp, 1, GL_FALSE, mvp);
+    }
+    glUseProgram(prog_);
+    curProg_ = prog_;
+    glUniformMatrix4fv(uMvp_, 1, GL_FALSE, mvp);
+}
+
+// THE MIRROR, THE ORIGINAL'S WAY (`sub_440D90`, 0x00440D90): the scene is
+// drawn FIRST through the camera reflected in the mirror's plane - with the
+// screen-X flip `dword_53ADE0` asks of `Raster_DrawTriangles`, here `flipX` -
+// and then AGAIN through the real camera, over it, with no clear between: only
+// `Render_Frame(reflected, 1)` then `Render_Frame(camera, 0)`. The reflected
+// pass leaves exactly the depths of a virtual room behind the plane, so the
+// real room's walls, nearer, cover it everywhere but where the wall is open for
+// the mirror, and the mirror's own faces blend over what shows through. No
+// stencil, no read-back: the CPU fallback read the frame back and converted
+// it, 190 ms a frame in Kay'l's apartment on the console (2026-09-30). The
+// reflected pass takes the draws in FRONT of the plane, as the fallback does -
+// the port's own guard against what lies behind the mirror's wall.
+// `OMK_CPU_MIRROR=1` keeps the fallback, for laying the two side by side.
+bool GlesRenderer::drawMirrorScene(const View& v, const View& refl, std::span<const Draw> scene,
+                                   std::span<const Draw> sceneClipped, std::span<const Draw> mirror) {
+    static const bool cpuMirror = std::getenv("OMK_CPU_MIRROR") != nullptr;
+    if (cpuMirror || mirror.empty()) return false;
+    begin(v);
+    setView(refl);
+    for (const auto& d : sceneClipped) submit(d);
+    setView(v);
+    for (const auto& d : scene) submit(d);
+    for (const auto& d : mirror) submit(d);
+    end();
+    return true;
+}
+
+void GlesRenderer::begin(const View& view) {
+    g_glesWindow.uploads += g_glesFrame.uploads;
+    g_glesWindow.uploadBytes += g_glesFrame.uploadBytes;
+    g_glesWindow.uploadMs += g_glesFrame.uploadMs;
+    g_glesWindow.drawMs += g_glesFrame.drawMs;
+    g_glesWindow.tieMs += g_glesFrame.tieMs;
+    g_glesWindow.wholeUploads += g_glesFrame.wholeUploads;
+    g_glesWindow.streamed += g_glesFrame.streamed;
+    g_glesFrame = GlesFrameCounts{};
+    if (!deadBufs_.empty()) {
+        glDeleteBuffers(static_cast<GLsizei>(deadBufs_.size()), deadBufs_.data());
+        deadBufs_.clear();
+    }
+    ++frameNo_;
+    st_ = RasterStats{};
+    view_ = view;
+    fog_ = view.fog;
+    fogStart_ = view.fogStart;
+    fogEnd_ = view.fogEnd;
+    for (int i = 0; i < 3; ++i) fogColour_[i] = static_cast<float>(view.fogColour[i]) / 255.0f;
+    dither_ = view.dither;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    glViewport(0, 0, w_, h_);
+    glDisable(GL_SCISSOR_TEST);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);   // black, as the engine clears
+    OMK_GL_CLEAR_DEPTH(1.0f);
+    glDepthMask(GL_TRUE);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    setView(view);
     lastPose_ = nullptr;
     lastPoseGeo_ = nullptr;
     forgetState();
     if (posed_) {
         glUseProgram(posed_);
-        glUniformMatrix4fv(posedLoc_.mvp, 1, GL_FALSE, mvp);
         glUniform1f(posedLoc_.clock, view.shimmerClock);
     }
     glUseProgram(prog_);
     curProg_ = prog_;
-    glUniformMatrix4fv(uMvp_, 1, GL_FALSE, mvp);
     glUniform1f(uClock_, view.shimmerClock);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LESS);

@@ -1500,3 +1500,25 @@ lines, 60-frame means): `world begin..end` 23.2 ms, of which uploads 15.9 ms
 16.3; `grid moving` 6.9 (the moving collision layer rebuilt every frame);
 `motion patch` 5.7; `staged bodies` 3.9. The whole buffers and the grid are
 the next two targets (row d).
+
+### 2026-09-30: the streaming ring on the console, and Kay'l's apartment
+
+The reader (`omk-play-20260930-031525.log`): the Bowie frame now streams 10-14
+of its uploads through the ring, but `gles world` is still 11-14 ms for ~1 MB
+a frame - the cost is the WRITE into GPU memory (and its conversion), about 1 ms
+per upload whatever the path, not vitaGL's allocation. Windows with fades or
+overlays stream nothing: the ring counts a frame per PRESENT and those frames
+present more than once (to fix: one count per frame). `grid moving` is steep
+5.0 + floor 1.9 ms and `motion` corners 3.0 + soups 2.2 ms - proportional to
+the triangles and corners touched, ~70x the Mac where the frame is ~13x; the
+heap is ordinary cached newlib memory and the clocks are 444/222/222, so the
+cause is still open.
+
+*"Kay'l apartment was very slow"* - 440 ms frames: the MIRROR, on the CPU
+fallback, `glReadPixels` 88 ms + the 565 conversion 102 ms a frame. The GLES
+backend now draws it the ORIGINAL's way (`sub_440D90`: the reflected pass,
+then the real pass over it with no clear - draw order and depth, read
+2026-09-30, `docs/ASSETS.md` 4c): no read-back, no stencil. Vulkan was moved
+from its stencil reconstruction to the same two passes. Mac: the GLES and
+Vulkan mirrors agree; both differ from the CPU fallback only by its read-back
+dither and a far object its mask let through.

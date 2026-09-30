@@ -2214,38 +2214,25 @@ bool VulkanRenderer::drawMirrorScene(const omk::View& v, const omk::View& refl,
                                      std::span<const omk::Draw> scene,
                                      std::span<const omk::Draw> sceneClipped,
                                      std::span<const omk::Draw> mirror) {
-    if (pipeStencil_ == VK_NULL_HANDLE || mirror.empty()) return false;
-
-    begin(v);                       // clears colour, depth AND stencil
-    for (const auto& d : scene) submit(d);          // 1. the room
-
-    // 2. mark the mirror's visible pixels. Depth-tested, so the parts of the
-    //    plane buried in the wall are not marked - which is the thing the CPU
-    //    mask had to be taught by differencing two passes.
-    forcePipeline_ = pipeStencil_;
-    for (const auto& d : mirror) submit(d);
-
-    // The marker writes NO COLOUR, so it has to be dropped before anything
-    // that should be visible. Leaving it set drew the whole reflection through
-    // a colour mask of 0 - the wall came out flat and mirrorless, while the
-    // coverage number stayed at 0.998 because the wall is lit either way. The
-    // picture said it instantly; the metric did not.
-    forcePipeline_ = VK_NULL_HANDLE;
-
-    // 3. depth back to the far plane inside the mark
-    vkCmdBindPipeline(cb_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeDepthReset_);
-    vkCmdDraw(cb_, 3, 1, 0, 0);
-
-    // 4. the reflection, which can only land where the stencil says
+    // THE ORIGINAL'S TWO PASSES (`sub_440D90`, 0x00440D90, read 2026-09-30):
+    // the scene through the camera reflected in the mirror's plane FIRST, then
+    // through the real camera over it - `Render_Frame(reflected, 1)` then
+    // `Render_Frame(camera, 0)`, and `Render_FlushBuckets` begins its scene
+    // with ZENABLE on and clears nothing between them. The reflected pass
+    // leaves the depths of a virtual room behind the plane, so the real room's
+    // walls, nearer, cover it everywhere but the mirror's opening, and the
+    // mirror's own faces blend over what shows through. It replaces a stencil
+    // mark and depth reset written before that was read (a reconstruction:
+    // `CLAUDE.md` 6 had the confinement "not traced"); the GLES backend does
+    // the same, so the two draw a mirror alike. The draws in FRONT of the plane
+    // only, as the CPU fallback takes them.
+    if (mirror.empty()) return false;
+    begin(v);
     pushView(refl);
-    reflStencil_ = true;
     for (const auto& d : sceneClipped) submit(d);
-    reflStencil_ = false;
     pushView(v);
-
-    // 5. the mirror's own faces, blended over the reflection
+    for (const auto& d : scene) submit(d);
     for (const auto& d : mirror) submit(d);
-
     end();
     return true;
 }

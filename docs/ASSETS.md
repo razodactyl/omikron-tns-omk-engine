@@ -1205,6 +1205,25 @@ frame driving the face, through the same data path the browser app uses:
   > normal and the confinement to the mirror's area — because a wrong plane, a
   > flipped normal and the wrong screen flip all look plausible in a still
   > frame and only come apart when the camera moves. `verify.py: mirror pass`.
+  >
+  > **HOW THE ENGINE CONFINES IT - read 2026-09-30, and it is neither a clip
+  > nor a stencil.** `sub_440D90` calls `Render_Frame(reflected, 1)` and THEN
+  > `Render_Frame(camera, 0)`, and `Render_Frame`'s flag only sets
+  > `dword_53ADE0`, the screen-X flip; `Render_FlushBuckets` (the bank-0 draw)
+  > begins its scene with `ZENABLE` on and clears nothing between the two. So
+  > the reflected pass leaves in the z-buffer the depths of a virtual room
+  > behind the mirror's plane, and the real pass, depth-tested against them,
+  > covers it with every surface nearer - the walls, everywhere but the
+  > opening the mirror hangs in, where the mirror's own faces blend over what
+  > shows through. Draw ORDER and DEPTH, the fixed-function way. The GLES and
+  > Vulkan backends now draw it exactly so (`drawMirrorScene`): the reflected
+  > scene, then the scene and the mirror - no read-back, no stencil; the
+  > Vulkan stencil mark and the CPU mask were reconstructions made while this
+  > was untraced. The CPU fallback (the software reference) still composites
+  > through its mask; it and the two passes differ by the dither of its
+  > read-back and by a far object the mask lets through where the depths do
+  > not. On the Vita the fallback cost 190 ms a frame in Kay'l's apartment
+  > (`glReadPixels` 88 ms, the 565 conversion 102).
 
   **Applied to both viewers** (2026-08-29, on request): additive and multiply
   are two blend states rather than one flat 50%, `decor_geometry` returns the

@@ -1465,3 +1465,38 @@ ENHANCEMENT on (`aa 8`, trilinear, anisotropy 16, per-pixel lighting, mapped
 shadows); the GLES backend implements none of them, so they cost no GPU time -
 but the CPU still builds the light lists and shadow slabs (`lights`, ~5 ms).
 `optimization.md` step 28 has the whole comparison with the original.
+
+### 2026-09-30: faster, then a crash in the Bowie sequence - the pool's chunk rule
+
+The reader (`omk-play-20260930-022357.log`, core
+`psp2core-1790728054-0x003df52a6f-eboot.bin.psp2dmp`): *"it was faster but it
+crashed in the cutscene"*, 214 frames into the Bowie sequence.
+
+**The core** (`vita-parse-core`, patched for Python 3 and pyelftools 0.29):
+the main thread's data abort in `_malloc_r`, reached from `lodRestFor` growing
+a vector - a free chunk whose links read 0x2b and 0x26. The chunk was a
+`std::vector<int>` at capacity 64 (0x108 bytes) holding 38/39/43, a LOD
+level-2 rest's corner mesh indices: freed by a reallocation, then WRITTEN
+after the free. Nothing on the main thread held such a pointer; ASan on the
+Mac, 1100 frames headless and 540 live with audio, found nothing - because the
+cause was the Vita's own POOL, which the Mac does not run.
+
+**The pool took the chunk of the worker's own slot** (`slice(w->index)`). The
+semaphore wakes ANY waiting worker, so with fewer chunks than workers - two
+workers, two chunks - the woken one could be worker 1, which ran chunk 1, the
+CALLER's own, while chunk 0 ran nowhere: two threads posing the same walkers
+and reallocating the same vectors. It had always been there and never
+triggered, because a street always handed the crowd pass three walkers or
+more; the side-plane cull (step 28 j) left one or two. Now each woken worker
+`fetch_add`s the next chunk, as the `std::thread` pool always did
+(`taken++`). `omk_bench` gains a tiling test at 1..6 items: EXACT in Vita3K
+with the fix, **BROKEN (265 of 3000 calls) with the old rule restored** - while
+the bench's existing hash test stayed EXACT either way, which is how the bug
+hid.
+
+**The same log attributes the Bowie frame for the first time** (the step 28b
+lines, 60-frame means): `world begin..end` 23.2 ms, of which uploads 15.9 ms
+(16.7 a frame, 15.7 of them WHOLE buffers, 1136 KB); `pedestrians, traffic`
+16.3; `grid moving` 6.9 (the moving collision layer rebuilt every frame);
+`motion patch` 5.7; `staged bodies` 3.9. The whole buffers and the grid are
+the next two targets (row d).

@@ -241,6 +241,9 @@ the Vita work so far was verified with `--only` over `engine: vita bench`,
 * **`int()` in a Vita shader ROUNDS (half to even), it does not truncate** -
   `int(k + 0.5)` is `k + 1` for odd `k`. `floor` first (2026-09-29; it was the
   pose self-test's "odd slots", misread for two days as a row-stride rule).
+* **The Vita pool must hand out chunks, not assign them by slot** - a woken
+  worker is any worker (2026-09-30, the Bowie crash). Test a pool at the job
+  counts a culled frame gives it (1-2), not only at big ones.
 * **The A9 has no integer DIVIDE**: a `/` by a runtime value is a library
   call. Keep it out of per-pixel loops (the overlay planes' `row`, 2026-09-29).
 * **vitaGL overflows uniform ARRAYS** - use separate `vec4`s (`uWave0..7`).

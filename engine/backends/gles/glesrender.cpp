@@ -687,6 +687,12 @@ private:
     std::vector<std::uint32_t> lastOverlay_;   // a hash a row of what `surfTex_` holds
     std::vector<unsigned char> maskFlagged_, surfFlagged_;
     long overlayRows_ = 0;                     // rows re-sent, for the timing line
+    // `presentSurface`'s own sync (todo/optimization.md step 34): how many
+    // more frames are copied whole without asking which rows changed, and -
+    // under `OMK_PRESENT_CHECK` - what the texture must hold by the rows sent
+    int surfSkip_ = 0;
+    std::vector<std::uint16_t> surfShadow_;
+    long surfCheckFrames_ = 0, surfCheckBad_ = 0, surfRowsSent_ = 0, surfRowsKept_ = 0;
 public:
     long takeOverlayRows() { const long r = overlayRows_; overlayRows_ = 0; return r; }
 private:
@@ -2079,16 +2085,118 @@ bool GlesRenderer::presentSurface(const Surface& s, int winW, int winH) {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     }
     const double t0 = glesClockMs();
-    lastOverlay_.clear();   // the texture is about to hold something else
     glBindTexture(GL_TEXTURE_2D, surfTex_);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 2);
+    // ONLY THE ROWS THAT CHANGED, as `presentOverlay` sends its own - and on
+    // the Vita, as there, written into the texture's own memory rather than
+    // through `glTexSubImage2D`, which first copies the whole texture to a new
+    // allocation when the GPU used it in the last frames. This sent the whole
+    // surface every frame: 10-15 ms of a console's start-menu frame, and the
+    // same for a screen nothing on is moving (the pause menu, a shop).
+    //
+    // A surface that is MOSTLY moving - the start menu's cloud changes seven
+    // rows in ten, the pause screen every one - would pay the row hashes and
+    // gain little, so once half the rows have changed the next fifteen frames
+    // are copied whole without asking, the hashes thrown away; then one frame
+    // takes them again and the next compares.
+    static const bool check = std::getenv("OMK_PRESENT_CHECK") != nullptr;
+    const std::size_t rowBytes = static_cast<std::size_t>(s.w) * 2u;
+    const unsigned char* cur = reinterpret_cast<const unsigned char*>(s.px.data());
+    const auto rowHash = [](const unsigned char* p, std::size_t n) {
+        std::uint32_t h = 2166136261u;
+        const std::uint32_t* q = reinterpret_cast<const std::uint32_t*>(p);
+        for (std::size_t i = 0; i < n / 4; ++i) h = (h ^ q[i]) * 16777619u;
+        if (n & 2u) h = (h ^ reinterpret_cast<const std::uint16_t*>(p)[n / 2 - 1]) * 16777619u;
+        return h;
+    };
+#if defined(__vita__)
+    unsigned char* texData = nullptr;
+    const std::size_t stride = static_cast<std::size_t>((s.w + 7) & ~7) * 2u;
+#endif
+    const auto shadowRow = [&](int y) {
+        if (check) std::memcpy(surfShadow_.data() + static_cast<std::size_t>(y) * s.w,
+                               cur + y * rowBytes, rowBytes);
+    };
+    const auto sendRow = [&](int y) {
+#if defined(__vita__)
+        if (texData) std::memcpy(texData + y * stride, cur + y * rowBytes, rowBytes);
+        else
+#endif
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y, s.w, 1, GL_RGB, GL_UNSIGNED_SHORT_5_6_5,
+                        cur + y * rowBytes);
+        shadowRow(y);
+    };
+    const auto sendAll = [&] {
+#if defined(__vita__)
+        if (texData) {
+            for (int y = 0; y < s.h; ++y) std::memcpy(texData + y * stride, cur + y * rowBytes, rowBytes);
+        } else
+#endif
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, s.w, s.h, GL_RGB,
+                        GL_UNSIGNED_SHORT_5_6_5, s.px.data());
+        for (int y = 0; check && y < s.h; ++y) shadowRow(y);
+        surfRowsSent_ += s.h;
+    };
+    if (check && surfShadow_.size() != s.px.size()) surfShadow_.assign(s.px.size(), 0);
     if (s.w != surfW_ || s.h != surfH_) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, s.w, s.h, 0, GL_RGB,
                      GL_UNSIGNED_SHORT_5_6_5, s.px.data());
+        for (int y = 0; check && y < s.h; ++y) shadowRow(y);
         surfW_ = s.w; surfH_ = s.h;
+        lastOverlay_.clear();
+        surfSkip_ = 0;
+        surfRowsSent_ += s.h;
     } else {
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, s.w, s.h, GL_RGB,
-                        GL_UNSIGNED_SHORT_5_6_5, s.px.data());
+#if defined(__vita__)
+        texData = static_cast<unsigned char*>(vglGetTexDataPointer(GL_TEXTURE_2D));
+#endif
+        if (surfSkip_ > 0) {
+            --surfSkip_;
+            lastOverlay_.clear();
+            sendAll();
+        } else if (lastOverlay_.size() != static_cast<std::size_t>(s.h)) {
+            lastOverlay_.resize(static_cast<std::size_t>(s.h));
+            for (int y = 0; y < s.h; ++y) lastOverlay_[y] = rowHash(cur + y * rowBytes, rowBytes);
+            sendAll();
+        } else {
+            // the rows that differ, found first: a desktop GL is handed one
+            // upload when most of them do, not a call a row
+            int changed = 0;
+            surfFlagged_.assign(static_cast<std::size_t>(s.h), 0);
+            for (int y = 0; y < s.h; ++y) {
+                const std::uint32_t hsh = rowHash(cur + y * rowBytes, rowBytes);
+                if (hsh == lastOverlay_[y]) continue;
+                lastOverlay_[y] = hsh;
+                surfFlagged_[y] = 1;
+                ++changed;
+            }
+            bool whole = false;
+#if !defined(__vita__)
+            // (`OMK_PRESENT_ROWS`: the Vita's decision on a desktop - row by
+            // row always - so the check above can see the path a console takes)
+            static const bool rowsOnly = std::getenv("OMK_PRESENT_ROWS") != nullptr;
+            whole = !rowsOnly && changed * 4 > s.h;
+#endif
+            if (whole) { sendAll(); surfRowsSent_ -= s.h; }
+            else for (int y = 0; y < s.h; ++y) if (surfFlagged_[y]) sendRow(y);
+            surfRowsSent_ += changed;
+            surfRowsKept_ += s.h - changed;
+            if (changed * 2 >= s.h) surfSkip_ = 15;
+        }
+    }
+    // the overlay's own sync takes `surfFlagged_` as "was flagged last frame"
+    surfFlagged_.assign(static_cast<std::size_t>(s.h), 1);
+    if (check) {
+        ++surfCheckFrames_;
+        int bad = 0;
+        for (int y = 0; y < s.h; ++y)
+            bad += std::memcmp(surfShadow_.data() + static_cast<std::size_t>(y) * s.w,
+                               cur + y * rowBytes, rowBytes) != 0;
+        surfCheckBad_ += bad;
+        if (bad || (surfCheckFrames_ % 60) == 0)
+            std::printf("gles: present check - %ld frames, %ld rows that would show stale "
+                        "(this frame %d); %ld rows sent, %ld kept\n",
+                        surfCheckFrames_, surfCheckBad_, bad, surfRowsSent_, surfRowsKept_);
     }
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     const double t1 = glesClockMs();
@@ -2132,6 +2240,8 @@ bool GlesRenderer::presentOverlay(const Surface& s, const unsigned char* mask, c
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     }
     glBindTexture(GL_TEXTURE_2D, surfTex_);
+    // (a texture `presentSurface` left at another size holds no row of this)
+    if (s.w != surfW_ || s.h != surfH_) lastOverlay_.clear();
     // ONLY THE ROWS THAT CHANGED, and on the Vita not through GL at all.
     // vitaGL's `glTexSubImage2D` first COPIES THE WHOLE TEXTURE to a new
     // allocation when the GPU used it in the last frames (textures.c, "Copying

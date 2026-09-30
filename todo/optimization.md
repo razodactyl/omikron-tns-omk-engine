@@ -2207,6 +2207,42 @@ lives until its voice ends.
   first play in a scene converts its WAV on the frame; the original loads a
   scene's sounds with its `.SCX`. Not run on a console.
 
+### 34. A composed screen sent to the GPU by its changed rows (2026-09-30, M3)
+
+Row o of step 28: the start menu's `present` was 10-15 ms on the console.
+**The original** flips a DirectDraw surface it composed in place; there is no
+upload to take over. **The port** on GLES sent the whole CPU-composed surface
+with `glTexSubImage2D` every frame (`presentSurface` - every interface screen,
+the sneak, a film), and vitaGL copies a texture the GPU used in the last
+frames to a new allocation before it writes one byte of it.
+
+**Now** `presentSurface` does what `presentOverlay` has done since the G6
+work: a hash a row, only the rows that differ are sent, and on the Vita they
+are written into the texture's own memory (`vglGetTexDataPointer`) rather than
+through GL. A surface that is mostly moving would pay the hashes for little,
+so once half its rows have changed the next fifteen frames are copied whole
+without asking and the hashes retaken after. A desktop GL gets one upload when
+more than a quarter of the rows changed, not a call a row.
+
+| 120 frames, 800x600, M3 | rows sent | rows kept |
+|---|---|---|
+| the start menu (its cloud) | 70691 | 1309 |
+| the pause screen | all | 0 |
+| a sneak call (`--call 387`) | 19457 | **52543** |
+
+* **`OMK_PRESENT_CHECK=1`** keeps a shadow of what the texture holds BY THE
+  ROWS SENT and compares it with the surface every frame: `gles: present
+  check - N frames, 0 rows that would show stale`. 0 on the three screens
+  above. Shown to fail - skipping the odd rows reports 24426 stale - but only
+  under **`OMK_PRESENT_ROWS=1`**, which makes a desktop take the console's
+  row-by-row decision: without it the mutation PASSED, because a desktop sends
+  the whole surface when a quarter of the rows changed and so never reached
+  the broken path. The check is of the DECISION, not of GL: nothing reads the
+  texture back.
+* **Not tested anywhere**: the Vita's direct write. It is `presentOverlay`'s
+  code, which a console has run since 2026-09-27. No verify.py check (a GL
+  window). Not run on a console - there, read `present, swap` on the menu.
+
 ## What is NOT in scope
 
 * The software renderer's speed. It is the reference and a comparison tool;

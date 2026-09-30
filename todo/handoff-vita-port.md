@@ -199,6 +199,12 @@ Vita for a while, so the next work should be provable on the Mac.
   nothing and no longer holds the mixer's lock over a megabyte. In the next
   console log read the `sounds` section's spikes.
 
+* **step 34 - a composed screen sent by its changed rows**: the start menu,
+  the pause screen, the sneak and every other CPU-composed screen went to the
+  GPU whole, through vitaGL's copy; they now take the overlay's path (changed
+  rows, written into the texture's memory). Put `OMK_PRESENT_CHECK=1` in the
+  environment for one run if a screen shows stale rows: it says so by count.
+
 **The reader's rule for this work (2026-09-30)**: the original is faster than
 the port, so **read the original's function for each task first** and take
 what it does - it found the mirror's two passes, the crowd LOD, the camera
@@ -207,8 +213,7 @@ clock, and in step 30 that neither the player nor the sky is rewritten.
 **Next, in order**: what is left of an area change AFTER the set - the world
 rebuild, the texture uploads, the tie bake and the Session's cases 2..9 (the
 `.SCX`, the models), which the original does in one tick too, so there is no
-mechanism of its to take and the console log has to size them first; the start menu's whole-surface
-upload (row o of step 28); a scene's sounds converted with its `.SCX` rather
+mechanism of its to take and the console log has to size them first; a scene's sounds converted with its `.SCX` rather
 than on their first play; a conversation's first line. Anekbah's moving-mesh grid + patch (~12 ms, 70x
 the Mac, unexplained) waits for a console profile - and row d's fix (a moving
 set mesh drawn from rest with one matrix, as `o3de_SetNodePos` does) is now

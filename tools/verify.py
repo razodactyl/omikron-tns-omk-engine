@@ -9116,8 +9116,12 @@ def c_engine_used_object():
     # were compared against 32. The bracketed lines are diagnostics, not
     # results: dropping them leaves exactly the eight, in order. Fixed
     # 2026-09-06; the check had been red on NOISE, not on a wrong answer.
+    # ...and the SESSION's own narration since 2026-09-30 (`session: IAM/X kept
+    # in memory`, `session: area N's load completed - ...`, optimization
+    # steps 35/36) - diagnostics the same way, and red on noise again until
+    # this said so
     got = [ln.split() for ln in r.stdout.strip().splitlines()
-           if not ln.lstrip().startswith("[")]
+           if not ln.lstrip().startswith("[") and not ln.startswith("session:")]
     want = [
         "hand slot 0 held 0 id_in_slot 6 in_bag_before 2 in_bag_after 1".split(),
         # TAKING one off the floor: `Game_HandleEvent` case 10, which

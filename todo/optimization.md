@@ -2319,6 +2319,49 @@ Two more from the 14:00 console log, neither run on a console.
   `INDEX.md` and `readable/src absent` - a worktree has none of the
   uncommitted inputs. Killed; the sweep runs in the main tree or not at all.
 
+### 37. A moving set mesh drawn with one matrix, as `o3de_SetNodePos` moves it (2026-10-01, M3)
+
+Row d of step 28, the render half. The console's city frame spends `meshes
+placed` 7.2 ms and a partial upload every frame on the set meshes a scene
+moves - in Anekbah 33 of them (the `Cargo` ships and their `CA*` parts, the
+`Epale*`, the `Mirador*`, the turning `tete03`): 8229 corners rewritten into
+the set's buffer and the changed ranges sent again.
+
+**The original**: `o3de_SetNodePos` (0x004370A0) writes the node's three
+position floats and nothing else; `sub_494650` builds the node's matrix and
+`sub_4947F0` sends each vertex through it on the way to the card. And the
+view cull, `sub_48D3B0`, tests the node at THAT position (`+36..+44`, radius
+`+88`) - where the port culled a moving mesh at its AUTHORED one.
+
+**Now**, on a renderer that poses bodies: the first time a set mesh moves it
+is taken out of the set's draw and given its own geometry - its corners as
+built, less its origin, uploaded once - and drawn every frame with one affine
+(scale, rotation, `at`: `placeOne`'s order), culled at its placed origin with
+its radius times its largest scale. The set's buffer keeps it at rest; nothing
+is rewritten or re-sent. Its COLLISION is unchanged: its triangles are still
+patched into the soups and the moving grid rebuilt - the original's other half
+(collision in the mesh's own frame, `sub_4434B0`) is not done. The software
+and Vulkan backends keep the CPU patch; `OMK_CPU_MOTION=1` forces it, and
+`OMK_MESH_AT` (which reads the set's buffer) does too. The log says `motion:
+mesh 'X' drawn by the RENDERER from its own N corners` once a mesh.
+
+* **The same picture**: GLES against `OMK_CPU_MOTION=1`, byte-identical on
+  Anekbah's street (frame 90), the Bowie sequence (300, 600, 900), Kay'l's flat
+  and the Impasse (600). Corners kept relative to the origin make a pure
+  translation land bit for bit where the CPU patch put it, and the turning
+  `tete03` lands the same too. The comparison sees them: the affine shifted 40
+  units moves 534 pixels on the street and 253-2171 in the Bowie frames.
+* **One frame differs, and it is the cull**: Bowie frame 1200, 1766 pixels.
+  With the clip distance lifted (`--clip 0`) and the side planes off
+  (`OMK_NO_SIDECULL=1`) the two paths are byte-identical, so the drawing is
+  exact and the difference is WHERE the mesh is tested - its placed origin
+  now, as `sub_48D3B0` tests it, its authored one before.
+* **Uploads, the street on the M3**: 3.7 vertex uploads a frame -> 2.8, 585 KB
+  -> 313 KB, 1.9 ms -> 0.2 ms. Green: `engine: gles tie bake` (which walks
+  Anekbah with its moving meshes on the new path), `gles state cache`, `patch
+  index`, `node rest`, `shop door`. Not run on a console - there, read the
+  `scripted motion: meshes placed` section and `gles world`'s KB.
+
 ## What is NOT in scope
 
 * The software renderer's speed. It is the reference and a comparison tool;

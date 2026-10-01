@@ -212,6 +212,12 @@ Vita for a while, so the next work should be provable on the Mac.
   stale vitaGL. `todo/vita-port.md`'s 14:00 entry has the log read line by
   line and what to look for next.
 
+* **step 37 (2026-10-01) - a moving set mesh drawn with one matrix**: the
+  33 meshes Anekbah's scene moves are no longer rewritten into the set's
+  buffer and re-sent every frame; the renderer draws each from its own corners
+  with one affine, culled where it is. Collision still patched (the other half
+  of row d). `OMK_CPU_MOTION=1` is the old path.
+
 **The reader's rule for this work (2026-09-30)**: the original is faster than
 the port, so **read the original's function for each task first** and take
 what it does - it found the mirror's two passes, the crowd LOD, the camera

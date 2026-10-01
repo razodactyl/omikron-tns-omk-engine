@@ -5575,6 +5575,22 @@ int main(int argc, char** argv) {
         // arrive after the set does (the frame loop binds them)
         std::vector<omk::SceneRunner::SetEmitterMesh> emitters;
         std::vector<omk::Corner> baseCorners;
+        // A MOVING MESH DRAWN AS THE ENGINE DRAWS IT (todo/optimization.md step
+        // 37). `o3de_SetNodePos` (0x004370A0) writes a node's three floats and
+        // `sub_494650` builds its matrix; the vertices go through it on the way
+        // to the card, and nothing is rewritten. On a renderer that poses
+        // bodies, a set mesh the scene moves is taken out of the set's draw the
+        // first time it moves and drawn from a copy of its own corners - relative
+        // to its origin, so a pure translation lands bit for bit where the CPU
+        // patch put it - with one affine. Its collision triangles are still
+        // patched (`soup` / `steep`), and the set's buffer keeps it at rest.
+        struct MovingMesh {
+            omk::Geometry rest;          // the mesh's corners minus its origin, cornerMesh 0
+            float affine[12] = {1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0};
+            float at[3] = {0, 0, 0};     // where its origin is now
+            float reach = 0.0f;          // its radius times its largest scale
+        };
+        std::map<int, MovingMesh> moving;
         // THE VISIBLE-SET WALK's unit of work. `sub_48D3B0` walks the scene
         // MESH BY MESH and submits each one that passes; this port flattens a
         // set into batches by material, so a mesh's corners are runs inside
@@ -6810,6 +6826,12 @@ int main(int argc, char** argv) {
             for (const auto& ns : sr->nodeScales()) allScales[ns.first] = ns.second;
         }
         phSpan["motion gather"] += phaseNow() - motionGather0;
+        // the GPU path for the moving meshes: a renderer that poses bodies, and
+        // nothing this frame that reads their corners out of the set's buffer
+        // (`OMK_MESH_AT`); `OMK_CPU_MOTION=1` for the comparison
+        static const bool cpuMotion = omk::envSet("OMK_CPU_MOTION") ||
+                                      std::getenv("OMK_MESH_AT") != nullptr;
+        const bool gpuMotion = !cpuMotion && !cpuBodiesFlag && world.posesBodies();
         if (!allMotions.empty() || !allScales.empty()) {
             struct Patch {
                 float s[3] = {1.0f, 1.0f, 1.0f};
@@ -6952,10 +6974,73 @@ int main(int argc, char** argv) {
                                   offsetof(omk::Corner, x) == 0,
                                   "a Corner is 12 floats with x, y, z first");
                     const auto& meshCorners = w.cornersOfMesh[static_cast<std::size_t>(mi)];
-                    dirty.insert(dirty.end(), meshCorners.begin(), meshCorners.end());
                     const double motionCorners0 = phaseNow();
-                    omk::placePoints(pp, &w.baseCorners[0].x, 12, &w.geo.corners[0].x, 12,
-                                     meshCorners.data(), meshCorners.size());
+                    if (gpuMotion) {
+                        auto mit = w.moving.find(mi);
+                        if (mit == w.moving.end()) {
+                            // its own geometry, batch by batch in the set's
+                            // order, made once: the corners as BUILT, less the
+                            // mesh's origin
+                            WorldSlot::MovingMesh mm;
+                            const omk::Geometry& g = w.geo;
+                            for (const auto& b : g.batches) {
+                                const std::size_t first = mm.rest.corners.size();
+                                for (std::uint32_t c = b.start; c < b.start + b.count; ++c) {
+                                    if (c >= g.cornerMesh.size() || g.cornerMesh[c] != mi) continue;
+                                    omk::Corner k = w.baseCorners[c];
+                                    k.x = k.x - mp[0]; k.y = k.y - mp[1]; k.z = k.z - mp[2];
+                                    mm.rest.corners.push_back(k);
+                                }
+                                const std::size_t cnt = mm.rest.corners.size() - first;
+                                if (!cnt) continue;
+                                omk::Batch nb = b;
+                                nb.start = static_cast<std::uint32_t>(first);
+                                nb.count = static_cast<std::uint32_t>(cnt);
+                                mm.rest.batches.push_back(nb);
+                            }
+                            mm.rest.cornerMesh.assign(mm.rest.corners.size(), 0);
+                            mm.rest.revision = ++worldGeoRev;
+                            mit = w.moving.emplace(mi, std::move(mm)).first;
+                            std::printf("motion: mesh '%s' drawn by the RENDERER from its own %zu corners "
+                                        "(%zu batches) - its %zu in the set's buffer stay at rest\n",
+                                        w.meshes[static_cast<std::size_t>(mi)].name,
+                                        mit->second.rest.corners.size(), mit->second.rest.batches.size(),
+                                        meshCorners.size());
+                            // ...and the set's own corners for it go BACK to
+                            // where they were built, in case a CPU patch moved
+                            // them before
+                            omk::PointPlace still;
+                            for (int k = 0; k < 3; ++k) { still.origin[k] = 0; still.at[k] = 0; }
+                            omk::placePoints(still, &w.baseCorners[0].x, 12, &w.geo.corners[0].x, 12,
+                                             meshCorners.data(), meshCorners.size());
+                            dirty.insert(dirty.end(), meshCorners.begin(), meshCorners.end());
+                            moved = true;
+                        }
+                        // the placement as a 3x4 on (corner - origin): the scale,
+                        // then the rotation - `placeOne`'s order - then `at`
+                        WorldSlot::MovingMesh& mm = mit->second;
+                        float R[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+                        if (pa.rotated)
+                            for (int j = 0; j < 3; ++j) {
+                                const float e[3] = {j == 0 ? 1.0f : 0.0f, j == 1 ? 1.0f : 0.0f,
+                                                    j == 2 ? 1.0f : 0.0f};
+                                float col[3];
+                                omk::qrot(pa.q, e, col);
+                                for (int r = 0; r < 3; ++r) R[r][j] = col[r];
+                            }
+                        for (int r = 0; r < 3; ++r) {
+                            for (int j = 0; j < 3; ++j) mm.affine[4 * r + j] = R[r][j] * pa.s[j];
+                            mm.affine[4 * r + 3] = at[r];
+                            mm.at[r] = at[r];
+                        }
+                        const float smax = std::max({std::fabs(pa.s[0]), std::fabs(pa.s[1]),
+                                                     std::fabs(pa.s[2]), 1.0f});
+                        mm.reach = w.meshes[static_cast<std::size_t>(mi)].radius * smax;
+                    } else {
+                        dirty.insert(dirty.end(), meshCorners.begin(), meshCorners.end());
+                        omk::placePoints(pp, &w.baseCorners[0].x, 12, &w.geo.corners[0].x, 12,
+                                         meshCorners.data(), meshCorners.size());
+                    }
                     phSpan["motion corners"] += phaseNow() - motionCorners0;
                     // the collision soups follow the mesh exactly as the
                     // render corners above (`Sweep_MeshTest` collides
@@ -6981,7 +7066,7 @@ int main(int argc, char** argv) {
                     patchSoup(w.steep, w.baseSteep, w.steepTrisOfMesh[static_cast<std::size_t>(mi)], movedSteep[sl]);
                     phSpan["motion soups"] += phaseNow() - motionSoups0;
                     soupsMoved = true;
-                    moved = true;
+                    if (!gpuMotion) moved = true;
                 }
                 phSpan["motion patch"] += phaseNow() - motionPatch0;
                 if (moved) {
@@ -18338,7 +18423,7 @@ int main(int argc, char** argv) {
             // that a correct cull leaves the frame byte-identical
             // (`OMK_NO_SIDECULL=1` for the other side of it).
             const float clipReach = static_cast<float>(clipInches);
-            std::size_t runsDrawn = 0, runsCulled = 0;
+            std::size_t runsDrawn = 0, runsCulled = 0, movingDrawn = 0, movingCulled = 0;
             for (int slot = 0; slot < 2; ++slot) {
                 const WorldSlot& w = worldSlots[static_cast<std::size_t>(slot)];
                 // loaded and solid, but not in the RENDER list (state 1)
@@ -18371,6 +18456,11 @@ int main(int argc, char** argv) {
                 }
                 // One test per mesh, cached across its runs.
                 std::vector<std::uint8_t> vis(w.meshes.size(), 2);   // 2 = untested
+                // a mesh drawn from its own geometry (`MovingMesh`) is out of
+                // the set's draw - never side-culled, so never bridged over
+                for (const auto& kv : w.moving)
+                    if (kv.first >= 0 && static_cast<std::size_t>(kv.first) < vis.size())
+                        vis[static_cast<std::size_t>(kv.first)] = 0;
                 const auto visible = [&](std::int32_t mi) -> bool {
                     if (mi < 0 || static_cast<std::size_t>(mi) >= w.meshes.size()) return true;
                     std::uint8_t& v = vis[static_cast<std::size_t>(mi)];
@@ -18434,6 +18524,24 @@ int main(int argc, char** argv) {
                                      &w.geo, start, count, b.blend, b.cutout});
                     i = j;
                 }
+                // ...and the moving meshes, where they ARE: the clip distance
+                // and the side planes about their placed origin
+                for (const auto& kv : w.moving) {
+                    const WorldSlot::MovingMesh& mm = kv.second;
+                    const float dx = mm.at[0] - view.cam.eye[0], dy = mm.at[1] - view.cam.eye[1],
+                                dz = mm.at[2] - view.cam.eye[2];
+                    const float reach = mm.reach + clipReach;
+                    if (!(reach * reach > dx * dx + dy * dy + dz * dz) ||
+                        outsideView(mm.at, mm.reach, false)) { ++movingCulled; continue; }
+                    ++movingDrawn;
+                    for (const auto& b : mm.rest.batches) {
+                        draws.push_back({keyOf(b.blend, b.cutout,
+                                               static_cast<std::uint32_t>(b.material) + texBase),
+                                         &mm.rest, b.start, b.count, b.blend, b.cutout});
+                        draws.back().meshPose = mm.affine;
+                        draws.back().meshPoses = 1;
+                    }
+                }
             }
             if (clipReport) {
                 if (unlimitedClip)
@@ -18442,6 +18550,9 @@ int main(int argc, char** argv) {
                 else
                     std::printf("clip: %.0f in - %zu mesh runs drawn, %zu culled\n",
                                 clipInches, runsDrawn, runsCulled);
+                if (movingDrawn + movingCulled)
+                    std::printf("clip: and %zu moving meshes drawn by the renderer from their "
+                                "own corners, %zu culled\n", movingDrawn, movingCulled);
                 clipReport = false;
             }
             // A FRAME WHERE THE SET IS CULLED AND THE BODIES ARE NOT draws a

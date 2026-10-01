@@ -487,6 +487,28 @@ inline std::pair<const std::uint32_t*, const std::uint32_t*> cellList(const Soup
     return {g.index.data() + g.start[c], g.index.data() + g.start[c + 1]};
 }
 
+// The moving layer's candidates under (x, z): with `useParts`, every part whose
+// extent holds the point, whole - one part's list as it is, several merged
+// into `scratch` (each is ascending and they do not overlap).
+inline std::pair<const std::uint32_t*, const std::uint32_t*> movingList(
+        const SplitSoupGrid& g, double x, double z, std::vector<std::uint32_t>& scratch) {
+    if (!g.useParts) return cellList(g.moving, x, z);
+    const MovingPart* only = nullptr;
+    int hits = 0;
+    for (const auto& p : g.parts) {
+        if (p.ids.empty()) continue;
+        if (!(x >= p.minX - kGridEps && x <= p.maxX + kGridEps &&
+              z >= p.minZ - kGridEps && z <= p.maxZ + kGridEps)) continue;
+        if (++hits == 1) { only = &p; continue; }
+        if (hits == 2) scratch.assign(only->ids.begin(), only->ids.end());
+        scratch.insert(scratch.end(), p.ids.begin(), p.ids.end());
+    }
+    if (hits == 0) return {nullptr, nullptr};
+    if (hits == 1) return {only->ids.data(), only->ids.data() + only->ids.size()};
+    std::sort(scratch.begin(), scratch.end());
+    return {scratch.data(), scratch.data() + scratch.size()};
+}
+
 // Visit the two ascending lists as one ascending sequence. A triangle is in one
 // layer only, so there is nothing to de-duplicate.
 template <class F>
@@ -505,7 +527,8 @@ std::optional<double> floorUnder(const TriangleSoup& tris, const SplitSoupGrid& 
                                  double x, double y, double z) {
     if (!g.matches(tris)) return floorUnder(tris, x, y, z);
     std::optional<double> best;
-    mergedWalk(cellList(g.fixed, x, z), cellList(g.moving, x, z), [&](std::uint32_t tri) {
+    std::vector<std::uint32_t> scratch;
+    mergedWalk(cellList(g.fixed, x, z), movingList(g, x, z, scratch), [&](std::uint32_t tri) {
         double hit;
         if (!underKernel(tris, 9 * static_cast<std::size_t>(tri), x, z, hit)) return;
         // "below" is a LARGER y, and strictly below the origin
@@ -526,7 +549,8 @@ std::optional<double> floorUnder(const TriangleSoup& tris, const SplitSoupGrid& 
         for (std::size_t t = 0; t + 9 <= tris.size(); t += 9) visit(static_cast<std::uint32_t>(t / 9));
         return best;
     }
-    mergedWalk(cellList(g.fixed, x, z), cellList(g.moving, x, z), visit);
+    std::vector<std::uint32_t> scratch;
+    mergedWalk(cellList(g.fixed, x, z), movingList(g, x, z, scratch), visit);
     return best;
 }
 
@@ -534,7 +558,8 @@ std::optional<GroundHit> surfaceUnder(const TriangleSoup& tris, const SplitSoupG
                                       double x, double y, double z) {
     if (!g.matches(tris)) return surfaceUnder(tris, x, y, z);
     std::optional<GroundHit> best;
-    mergedWalk(cellList(g.fixed, x, z), cellList(g.moving, x, z), [&](std::uint32_t tri) {
+    std::vector<std::uint32_t> scratch;
+    mergedWalk(cellList(g.fixed, x, z), movingList(g, x, z, scratch), [&](std::uint32_t tri) {
         const std::size_t t = 9 * static_cast<std::size_t>(tri);
         double hit;
         if (!underKernel(tris, t, x, z, hit)) return;
@@ -573,7 +598,14 @@ void gatherSplitIds(const SplitSoupGrid& g, double minX, double maxX, double min
             }
     };
     gather(g.fixed);
-    gather(g.moving);
+    if (!g.useParts) gather(g.moving);
+    else
+        for (const auto& p : g.parts) {
+            if (p.ids.empty() || minX > maxX || minZ > maxZ) continue;
+            if (maxX < p.minX - kGridEps || minX > p.maxX + kGridEps ||
+                maxZ < p.minZ - kGridEps || minZ > p.maxZ + kGridEps) continue;
+            ids.insert(ids.end(), p.ids.begin(), p.ids.end());
+        }
     std::sort(ids.begin(), ids.end());
     ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
 }
@@ -817,6 +849,20 @@ bool clampNormal(unsigned mask, bool high, const double n[3], double out[3]) {
     if (L <= 0.00999999987) { out[0] = out[1] = out[2] = 0.0; return false; }
     out[0] /= L; out[1] /= L; out[2] /= L;
     return true;
+}
+
+void measurePart(const TriangleSoup& tris, MovingPart& part) {
+    double lo[2] = {1e300, 1e300}, hi[2] = {-1e300, -1e300};
+    for (const std::uint32_t t : part.ids) {
+        const std::size_t i = 9 * static_cast<std::size_t>(t);
+        if (i + 9 > tris.size()) continue;
+        for (int k = 0; k < 3; ++k) {
+            const double x = tris[i + 3 * k], z = tris[i + 3 * k + 2];
+            lo[0] = std::min(lo[0], x); hi[0] = std::max(hi[0], x);
+            lo[1] = std::min(lo[1], z); hi[1] = std::max(hi[1], z);
+        }
+    }
+    part.minX = lo[0]; part.maxX = hi[0]; part.minZ = lo[1]; part.maxZ = hi[1];
 }
 
 }  // namespace omk

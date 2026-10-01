@@ -218,12 +218,37 @@ TriangleSoup soupInBox(const TriangleSoup& tris, const SoupGrid& grid,
 // cells' lists as ONE ascending merge - the same candidates in the same order as
 // a single grid over all of them, so the same answer, bit for bit
 // (`engine/tools/probe_grid.cpp`'s split rows).
+// THE MOVING LAYER BY MESH, the engine's way (todo/optimization.md step 38).
+// `o3de_ForEachMeshInBox` (0x004430A0) tests a moving mesh WHOLE - its sphere
+// against the query - before any of its faces, and rebuilds nothing when a
+// mesh moves. So, in place of `moving`, a `SplitSoupGrid` may carry the moving
+// triangles grouped by the mesh they belong to, each group with the extent its
+// triangles have NOW: a query takes every group its point or box falls in,
+// whole. That is a superset of what a grid cell would give, the same
+// triangles are then put through the same exact per-triangle test in the same
+// ascending order, so the answer is the same bit for bit - and per frame the
+// groups cost an extent each, where the grid cost a rebuild.
+struct MovingPart {
+    std::vector<std::uint32_t> ids;          // ascending triangle numbers in the soup
+    double minX = 0.0, maxX = 0.0, minZ = 0.0, maxZ = 0.0;   // their extent now
+};
 struct SplitSoupGrid {
     SoupGrid fixed, moving;
+    // ...when `useParts`, `moving` is unused and these stand for it; their
+    // ids must not overlap, and `partsData` / `partsSize` say which soup they
+    // were made over, as `SoupGrid::data` does
+    bool useParts = false;
+    std::vector<MovingPart> parts;
+    const float* partsData = nullptr;
+    std::size_t partsSize = 0;
     bool matches(const TriangleSoup& tris) const {
-        return fixed.matches(tris) && moving.matches(tris);
+        return fixed.matches(tris) &&
+               (useParts ? (partsData == tris.data() && partsSize == tris.size())
+                         : moving.matches(tris));
     }
 };
+// The extent of a part's triangles in `tris` (a part with none gets an empty one).
+void measurePart(const TriangleSoup& tris, MovingPart& part);
 std::optional<double> floorUnder(const TriangleSoup& tris, const SplitSoupGrid& grid,
                                  double x, double y, double z);
 // ...and which triangle gave it: the FIRST in soup order to reach the answer,

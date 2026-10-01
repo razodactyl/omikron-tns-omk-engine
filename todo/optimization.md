@@ -2362,6 +2362,47 @@ mesh 'X' drawn by the RENDERER from its own N corners` once a mesh.
   index`, `node rest`, `shop door`. Not run on a console - there, read the
   `scripted motion: meshes placed` section and `gles world`'s KB.
 
+### 38. The moving layer as whole meshes, as `o3de_ForEachMeshInBox` tests them (2026-10-01, M3)
+
+Row d of step 28, the collision half, after step 37's drawing half.
+
+**The original**: `o3de_ForEachMeshInBox` (0x004430A0) tests a moving mesh
+WHOLE - its sphere against the query - before any of its faces, with the probe
+moved into the mesh's frame (`sub_4434B0`); when a mesh moves, nothing is
+rebuilt. **The port** kept the moving triangles in a grid of their own
+(step 7c) and rebuilt it every frame something moved - on the console
+`grids rebuilt` 6.9 ms a city frame.
+
+**Now** (`SplitSoupGrid::parts`, `MovingPart`, `measurePart`): the moving
+layer is the moving triangles grouped by the mesh they belong to, each group
+with the extent its triangles have NOW. A query takes every group its point or
+box falls in, whole. That is a superset of a grid cell's list, and every
+query already puts its candidates through an EXACT per-triangle test in
+ascending order - so the answers are the same bit for bit. Per moving frame a
+group costs one pass over its points for the extent and allocates nothing;
+the ids are re-gathered only when the moving set or the merge changes. The
+triangles themselves are still RE-PLACED in the soups (`soups patched`): the
+probe-into-the-mesh's-frame half was not taken, because it would change the
+answers in the last bits and nothing could then be proven equal.
+`OMK_MOVING_GRID=1` rebuilds the grid as before.
+
+* **The same answers**: a 150-frame walk down Anekbah's street with
+  `OMK_VERIFY_SPLIT`, `OMK_VERIFY_GROUND` and `OMK_VERIFY_PATCH` - 22662 grid
+  probes, 226 walker and 121 decor probes, 664 sweeps, all 0 mismatched
+  against the linear scans, the moving layer 24 + 18 whole meshes; the frame
+  and the player's end state identical to `OMK_MOVING_GRID=1`. Over Anekbah's
+  754 moving walkable triangles and 20000 random probes, 0 answers differ.
+* **Cost on the M3**: the per-frame layer 18.3 -> 3.3 us; a probe ~7% dearer
+  (3.42 -> 3.67 ms for 20000), since a probe that falls in a group tests all
+  of its triangles. The console's 6.9 ms is far more than this arithmetic on
+  any reading (step 28's ~70x); what the new layer removes there that the
+  M3 cannot show is the per-frame ALLOCATION - the grid's four vectors - and
+  that is a guess until a log says.
+* Green: `engine: probe grid`, `ground grid`, `patch index`, `airlock walk`,
+  `shop door`, `tunnel door walk`, `walker falls`. `split grid` and `sweep
+  grid` are the standing reds with the same values as before, 0 mismatches in
+  their in-game halves (11322 probes; 692 sweeps).
+
 ## What is NOT in scope
 
 * The software renderer's speed. It is the reference and a comparison tool;

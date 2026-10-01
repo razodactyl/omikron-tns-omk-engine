@@ -218,6 +218,12 @@ Vita for a while, so the next work should be provable on the Mac.
   with one affine, culled where it is. Collision still patched (the other half
   of row d). `OMK_CPU_MOTION=1` is the old path.
 
+* **step 38 (2026-10-01) - the moving collision layer as whole meshes**: no
+  grid rebuilt for the moving triangles each frame; a query takes a moving
+  mesh whole by its current extent, as the original does, with the same
+  answers bit for bit. In the next log: `scripted motion: grids rebuilt`.
+  `OMK_MOVING_GRID=1` is the old path.
+
 **The reader's rule for this work (2026-09-30)**: the original is faster than
 the port, so **read the original's function for each task first** and take
 what it does - it found the mirror's two passes, the crowd LOD, the camera

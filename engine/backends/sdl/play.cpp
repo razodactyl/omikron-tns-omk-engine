@@ -3267,6 +3267,7 @@ int main(int argc, char** argv) {
         // (15137 triangles in Anekbah) to find the ~750 that move
         playerGrid.moving = omk::buildSoupGrid(playerSoup, 256.0,
                                                std::span<const std::uint32_t>(playerMovingIds));
+        playerGrid.useParts = false;    // the grid stands for the moving layer again
     };
     // True while `playerSoup` / `playerSteep` are exactly the shown slots' soups
     // concatenated - set by a full merge, cleared by a slot load - so a moving
@@ -3290,6 +3291,7 @@ int main(int argc, char** argv) {
     const auto rebuildSteepMovingGrid = [&]() {
         playerSteepGrid.moving = omk::buildSoupGrid(playerSteep, 256.0,
                                                     std::span<const std::uint32_t>(steepMovingIds));
+        playerSteepGrid.useParts = false;
     };
     std::string playerModel, playerCtlName;
     bool  playerReady = false, adventure = false, followCam = false;
@@ -5591,6 +5593,9 @@ int main(int argc, char** argv) {
             float reach = 0.0f;          // its radius times its largest scale
         };
         std::map<int, MovingMesh> moving;
+        // every mesh whose collision triangles a motion has re-placed, in the
+        // order they first moved - the moving layer's parts (`SplitSoupGrid::parts`)
+        std::vector<int> soupMovers;
         // THE VISIBLE-SET WALK's unit of work. `sub_48D3B0` walks the scene
         // MESH BY MESH and submits each one that passes; this port flattens a
         // set into batches by material, so a mesh's corners are runs inside
@@ -7064,6 +7069,8 @@ int main(int argc, char** argv) {
                     const double motionSoups0 = phaseNow();
                     patchSoup(w.soup, w.baseSoup, w.soupTrisOfMesh[static_cast<std::size_t>(mi)], movedSoup[sl]);
                     patchSoup(w.steep, w.baseSteep, w.steepTrisOfMesh[static_cast<std::size_t>(mi)], movedSteep[sl]);
+                    if (std::find(w.soupMovers.begin(), w.soupMovers.end(), mi) == w.soupMovers.end())
+                        w.soupMovers.push_back(mi);
                     phSpan["motion soups"] += phaseNow() - motionSoups0;
                     soupsMoved = true;
                     if (!gpuMotion) moved = true;
@@ -7248,12 +7255,57 @@ int main(int argc, char** argv) {
             spanned("grid fixed", [&] {
                 if (newlyMoving || !playerGrid.fixed.matches(playerSoup)) rebuildFixedGrid();
             });
-            spanned("grid moving (floor)", [&] { rebuildMovingGrid(); });
+            // THE MOVING LAYER AS WHOLE MESHES (todo/optimization.md step 38):
+            // `o3de_ForEachMeshInBox` tests a moving mesh by its extent and
+            // rebuilds nothing, so in place of a grid rebuilt every frame the
+            // moving triangles stand in groups, one a mesh, each with the
+            // extent it has now - the ids re-gathered only when the moving set
+            // or the merge changed, the extents every moving frame.
+            // `OMK_MOVING_GRID=1` rebuilds the grid as before.
+            static const bool movingGrid = omk::envSet("OMK_MOVING_GRID");
+            const auto partsOf = [&](omk::SplitSoupGrid& grid, const omk::TriangleSoup& merged,
+                                     const std::vector<std::uint8_t>& movingTri, bool steep,
+                                     bool regather) {
+                if (regather || !grid.useParts) {
+                    grid.parts.clear();
+                    std::size_t off = 0;
+                    for (int sl = 0; sl < 2; ++sl) {
+                        const WorldSlot& w = worldSlots[static_cast<std::size_t>(sl)];
+                        if (w.stem.empty()) continue;
+                        const auto& byMesh = steep ? w.steepTrisOfMesh : w.soupTrisOfMesh;
+                        for (const int mi : w.soupMovers) {
+                            if (mi < 0 || static_cast<std::size_t>(mi) >= byMesh.size()) continue;
+                            omk::MovingPart part;
+                            for (const std::uint32_t t : byMesh[static_cast<std::size_t>(mi)]) {
+                                const std::size_t gt = off / 9 + t;
+                                // only what the fixed layer leaves out, so each
+                                // triangle is in one layer
+                                if (gt < movingTri.size() && movingTri[gt])
+                                    part.ids.push_back(static_cast<std::uint32_t>(gt));
+                            }
+                            if (!part.ids.empty()) grid.parts.push_back(std::move(part));
+                        }
+                        off += steep ? w.steep.size() : w.soup.size();
+                    }
+                    grid.moving = omk::SoupGrid{};
+                    grid.useParts = true;
+                }
+                for (auto& part : grid.parts) omk::measurePart(merged, part);
+                grid.partsData = merged.data();
+                grid.partsSize = merged.size();
+            };
+            spanned("grid moving (floor)", [&] {
+                if (movingGrid) rebuildMovingGrid();
+                else partsOf(playerGrid, playerSoup, playerMovingTri, false, newlyMoving);
+            });
             if (newlySteep) std::sort(steepMovingIds.begin(), steepMovingIds.end());
             spanned("grid fixed", [&] {
                 if (newlySteep || !playerSteepGrid.fixed.matches(playerSteep)) rebuildSteepFixedGrid();
             });
-            spanned("grid moving (steep)", [&] { rebuildSteepMovingGrid(); });
+            spanned("grid moving (steep)", [&] {
+                if (movingGrid) rebuildSteepMovingGrid();
+                else partsOf(playerSteepGrid, playerSteep, steepMovingTri, true, newlySteep);
+            });
             mark("scripted motion: grids rebuilt");
             // `OMK_VERIFY_SPLIT=1`: the moved triangles' centres from above and a
             // fixed lattice over the street, probed through the two-layer grid and
@@ -7291,11 +7343,15 @@ int main(int argc, char** argv) {
                         check(1804.0 + gx * 900.0, -2000.0, -6890.0 + gz * 900.0);
                 if (frames % 30 == 0)
                     std::printf("split verify: %ld moving frames, %ld probes, %ld mismatched, fixed %d x %d, moving %zu entries "
-                                "in %d x %d (steep moving %d x %d, %zu entries)\n",
+                                "in %d x %d (steep moving %d x %d, %zu entries)%s\n",
                                 frames, probes, mismatched, playerGrid.fixed.nx, playerGrid.fixed.nz,
                                 playerGrid.moving.index.size(), playerGrid.moving.nx, playerGrid.moving.nz,
                                 playerSteepGrid.moving.nx, playerSteepGrid.moving.nz,
-                                playerSteepGrid.moving.index.size());
+                                playerSteepGrid.moving.index.size(),
+                                playerGrid.useParts ? (" - the moving layer is " +
+                                    std::to_string(playerGrid.parts.size()) + " and " +
+                                    std::to_string(playerSteepGrid.parts.size()) +
+                                    " whole meshes, no grid").c_str() : "");
             }
         }
 
